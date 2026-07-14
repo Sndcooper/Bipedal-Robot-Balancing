@@ -1,0 +1,162 @@
+{
+  "timestamp": "20260711_095842",
+  "port": "COM3",
+  "aborted": true,
+  "config": {
+    "initial_params": {
+      "Kp": 11.21,
+      "Ki": 0.0,
+      "Kd": 0.715,
+      "Kd_vel": 0.0,
+      "alpha": 0.96
+    },
+    "param_ranges": {
+      "Kp": [
+        0.0,
+        60.0
+      ],
+      "Ki": [
+        0.0,
+        8.0
+      ],
+      "Kd": [
+        0.0,
+        12.0
+      ],
+      "Kd_vel": [
+        0.0,
+        10.0
+      ],
+      "alpha": [
+        0.8,
+        0.999
+      ]
+    },
+    "iterations": 40,
+    "eval_window_s": 7.0,
+    "disturb_angle_deg": 5.0,
+    "disturb_time_s": 0.4,
+    "cost_weights": {
+      "target": 0.0,
+      "settle_band": 2.0,
+      "min_osc_hz": 0.25,
+      "w_rms": 1.0,
+      "w_osc": 2.5,
+      "w_settle": 1.5,
+      "w_mae": 0.4,
+      "w_motor": 0.3,
+      "w_sat": 4.0,
+      "freq_weight": 0.6,
+      "cutoff_penalty": 1000.0,
+      "nodata_penalty": 900.0,
+      "min_samples": 20
+    },
+    "safe_tilt_limit": 35.0
+  },
+  "best": {
+    "params": {
+      "Kp": 11.21,
+      "Ki": 0.0,
+      "Kd": 0.715,
+      "Kd_vel": 0.0,
+      "alpha": 0.96
+    },
+    "cost": 80.04257790066882,
+    "components": {
+      "mae_deg": 5.984,
+      "rms_deg": 8.67,
+      "peak_to_peak_deg": 37.241,
+      "amplitude_deg": 18.621,
+      "dominant_freq_hz": 0.143,
+      "osc_freq_used_hz": 0.0,
+      "spectral_concentration": 0.744,
+      "zero_cross_hz": 0.072,
+      "settle_time_s": 6.99,
+      "motor_rms": 0.449,
+      "saturation_frac": 0.113,
+      "cutoff": 0.0,
+      "contrib_rms": 8.67,
+      "contrib_osc": 57.905,
+      "contrib_settle": 10.486,
+      "contrib_mae": 2.394,
+      "contrib_motor": 0.135,
+      "contrib_sat": 0.454
+    }
+  },
+  "validation": null,
+  "trials": [
+    {
+      "index": 1,
+      "phase": "baseline",
+      "params": {
+        "Kp": 11.21,
+        "Ki": 0.0,
+        "Kd": 0.715,
+        "Kd_vel": 0.0,
+        "alpha": 0.96
+      },
+      "cost": 80.04257790066882,
+      "cutoff": false,
+      "components": {
+        "mae_deg": 5.984,
+        "rms_deg": 8.67,
+        "peak_to_peak_deg": 37.241,
+        "amplitude_deg": 18.621,
+        "dominant_freq_hz": 0.143,
+        "osc_freq_used_hz": 0.0,
+        "spectral_concentration": 0.744,
+        "zero_cross_hz": 0.072,
+        "settle_time_s": 6.99,
+        "motor_rms": 0.449,
+        "saturation_frac": 0.113,
+        "cutoff": 0.0,
+        "contrib_rms": 8.67,
+        "contrib_osc": 57.905,
+        "contrib_settle": 10.486,
+        "contrib_mae": 2.394,
+        "contrib_motor": 0.135,
+        "contrib_sat": 0.454
+      },
+      "n_samples": 141,
+      "elapsed_s": 57.2
+    },
+    {
+      "index": 2,
+      "phase": "probe:Kp+",
+      "params": {
+        "Kp": 14.21,
+        "Ki": 0.0,
+        "Kd": 0.715,
+        "Kd_vel": 0.0,
+        "alpha": 0.96
+      },
+      "cost": 1000.0,
+      "cutoff": true,
+      "components": {
+        "cutoff": 1.0,
+        "note": "SAFETY CUTOFF - trial counted as failure"
+      },
+      "n_samples": 161,
+      "elapsed_s": 58.2
+    },
+    {
+      "index": 3,
+      "phase": "probe:Kp-",
+      "params": {
+        "Kp": 8.21,
+        "Ki": 0.0,
+        "Kd": 0.715,
+        "Kd_vel": 0.0,
+        "alpha": 0.96
+      },
+      "cost": 1000.0,
+      "cutoff": true,
+      "components": {
+        "cutoff": 1.0,
+        "note": "SAFETY CUTOFF - trial counted as failure"
+      },
+      "n_samples": 3,
+      "elapsed_s": 70.2
+    }
+  ]
+}
