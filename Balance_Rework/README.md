@@ -9,6 +9,8 @@ It exists as a **parallel workspace** so the originals stay untouched as a fallb
 - `Balance_Rework/firmware/` — a full PlatformIO project (copied from the original,
   same `env:bluepill_f103c8`, same pinout) with the control/safety changes applied.
 - `Balance_Rework/autotuner/` — a new, safety-aware, 5-parameter PID tuning tool.
+- `Balance_Rework/mpu_inspector/mpu_inspector_gui.py` — Python Desktop GUI Diagnostic tool with animated physical bipedal robot view, real-time Matplotlib charts, signal noise diagnostics (`σ`), and built-in simulation mode (`--mock`).
+- `Balance_Rework/mpu_inspector/mpu_inspector_web.html` — Standalone HTML5 Web Serial GUI Dashboard (open in Chrome/Edge, zero install needed).
 
 Nothing here changes wiring: the pin map is identical to the root `Hardware_Connections.md`.
 

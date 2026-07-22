@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bipedal Robot — MPU6050 & Motor Inspector (Web Serial)</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg-dark: #0d0f14;
+      --card-bg: rgba(26, 30, 41, 0.75);
+      --border-color: rgba(0, 229, 255, 0.18);
+      --cyan: #00e5ff;
+      --green: #4caf50;
+      --orange: #ff9800;
+      --red: #f44336;
+      --text: #e0e6ed;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg-dark);
+      background-image: radial-gradient(circle at 10% 20%, rgba(0, 229, 255, 0.05) 0%, transparent 40%),
+                        radial-gradient(circle at 85% 85%, rgba(244, 67, 54, 0.04) 0%, transparent 40%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 18px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 22px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      margin-bottom: 14px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+    .header-title {
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: var(--cyan);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .mode-banner {
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 0.95rem;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .mode-demo {
+      background: rgba(255, 152, 0, 0.18);
+      color: var(--orange);
+      border-color: rgba(255, 152, 0, 0.4);
+    }
+    .mode-live {
+      background: rgba(76, 175, 80, 0.18);
+      color: var(--green);
+      border-color: rgba(76, 175, 80, 0.4);
+    }
+    .mode-disc {
+      background: rgba(143, 155, 179, 0.12);
+      color: #8f9bb3;
+    }
+    .btn {
+      background: linear-gradient(135deg, #00b4db, #0083b0);
+      color: #fff;
+      border: none;
+      padding: 9px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      font-size: 0.92rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0, 229, 255, 0.3); }
+    .btn-mock { background: linear-gradient(135deg, #ff9800, #f57c00); }
+    .btn-danger { background: linear-gradient(135deg, #e53935, #c62828); }
+    .btn-clear { background: rgba(255,255,255,0.08); color: #ccc; border: 1px solid #444; }
+    .main-grid {
+      display: grid;
+      grid-template-columns: 390px 1fr;
+      gap: 18px;
+    }
+    @media (max-width: 1080px) { .main-grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 16px;
+      backdrop-filter: blur(8px);
+      margin-bottom: 16px;
+    }
+    .card-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--cyan);
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      border-bottom: 1px solid rgba(0, 229, 255, 0.15);
+      padding-bottom: 8px;
+    }
+    #visualizerCanvas {
+      width: 100%;
+      height: 240px;
+      background: #11141c;
+      border-radius: 8px;
+      border: 1px solid #282f42;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .stat-box {
+      background: rgba(15, 18, 26, 0.6);
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .stat-label { font-size: 0.78rem; color: #8f9bb3; margin-bottom: 4px; }
+    .stat-value { font-size: 1.25rem; font-weight: 700; color: var(--green); }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      display: inline-block;
+    }
+    .badge-safe { background: rgba(76, 175, 80, 0.18); color: var(--green); }
+    .badge-warn { background: rgba(255, 152, 0, 0.18); color: var(--orange); }
+    .badge-danger { background: rgba(244, 67, 54, 0.22); color: var(--red); }
+    .chart-container {
+      position: relative;
+      height: 230px;
+      margin-bottom: 18px;
+    }
+    .cmd-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    input[type="text"] {
+      background: #12151f;
+      border: 1px solid #2d354a;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 6px;
+      flex: 1;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-title">
+      <span>🤖</span> Balance_Rework — Live MPU6050 & Motor Inspector
+    </div>
+    <div style="display: flex; gap: 10px;">
+      <button class="btn btn-clear" onclick="clearCharts()">🧹 Clear Charts</button>
+      <button class="btn btn-mock" id="btnMock" onclick="toggleMock()">▶ Simulate Demo Data</button>
+      <button class="btn" id="btnConnect" onclick="connectSerial()">🔌 Connect Web Serial (COM Port)</button>
+    </div>
+  </header>
+
+  <div id="modeBanner" class="mode-banner mode-disc">
+    <span id="modeText">⚪ DISCONNECTED — Click "🔌 Connect Web Serial (COM Port)" to stream live STM32 Bluepill hardware data, or click "▶ Simulate Demo Data" to test UI.</span>
+    <span id="modeSub">Telemetry Rate: 0.0 Hz</span>
+  </div>
+
+  <div class="main-grid">
+    <!-- Left Column: Visualizer & Diagnostics -->
+    <div>
+      <div class="card">
+        <div class="card-title">Physical Robot Horizon View</div>
+        <canvas id="visualizerCanvas" width="360" height="240"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="card-title">MPU6050 Signal Health & Diagnostics</div>
+        <div class="stat-grid">
+          <div class="stat-box">
+            <div class="stat-label">Telemetry Rate</div>
+            <div class="stat-value" id="statHz">0.0 Hz</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Signal Noise (RMS σ)</div>
+            <div class="stat-value" id="statNoise">0.00°</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Complementary Alpha</div>
+            <div class="stat-value" id="statAlpha" style="color: var(--cyan);">0.98</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Safety Cutoff Status</div>
+            <div id="statStatus"><span class="badge badge-safe">SAFE (Balancing)</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Firmware Command & Live Controls</div>
+        <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+          <button class="btn" style="flex: 1;" onclick="sendCmd('C')">⚖️ Calibrate MPU ('C')</button>
+          <button class="btn btn-danger" style="flex: 1;" onclick="sendCmd('M')">⚡ Toggle Motors ('M')</button>
+        </div>
+        <div class="cmd-group">
+          <input type="text" id="cmdInput" placeholder="Enter command e.g. A0.98 or T35" />
+          <button class="btn" onclick="sendInputCmd()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Interactive Charts -->
+    <div>
+      <div class="card">
+        <div class="card-title">MPU6050 Pitch Angle vs Safe Tilt Envelope (° )</div>
+        <div class="chart-container">
+          <canvas id="chartPitch"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Motor Control Effort (PID_OUT) & Velocity Damping (VEL)</div>
+        <div class="chart-container">
+          <canvas id="chartMotor"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Quadrature Encoder Ticks (Left / Right Odometry)</div>
+        <div class="chart-container">
+          <canvas id="chartEnc"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // State
+    let port, reader, writer;
+    let isMock = false;
+    let isLive = false;
+    let mockInterval = null;
+    let packetCount = 0;
+    let lastStatTime = Date.now();
+    let pitchHistory = [];
+
+    let currentPitch = 0, currentPid = 0, currentVel = 0, currentAlpha = 0.98, maxTilt = 35;
+    let encL = 0, encR = 0;
+    let safetyTriggered = false;
+
+    // Charts Setup
+    const maxPoints = 120;
+    const labels = Array(maxPoints).fill("");
+
+    Chart.defaults.color = "#9faabf";
+    Chart.defaults.borderColor = "rgba(255,255,255,0.06)";
+
+    const chartPitch = new Chart(document.getElementById("chartPitch"), {
+      type: 'line',
+      data: {
+        labels: [...labels],
+        datasets: [
+          { label: 'Pitch (°)', data: Array(maxPoints).fill(0), borderColor: '#00e5ff', borderWidth: 2.2, tension: 0.15, pointRadius: 0 },
+          { label: 'Max Safe Tilt (+)', data: Array(maxPoints).fill(35), borderColor: 'rgba(244,67,54,0.5)', borderDash: [5,5], borderWidth: 1.5, pointRadius: 0 },
+          { label: 'Max Safe Tilt (-)', data: Array(maxPoints).fill(-35), borderColor: 'rgba(244,67,54,0.5)', borderDash: [5,5], borderWidth: 1.5, pointRadius: 0 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: false, scales: { y: { min: -45, max: 45 } } }
+    });
+
+    const chartMotor = new Chart(document.getElementById("chartMotor"), {
+      type: 'line',
+      data: {
+        labels: [...labels],
+        datasets: [
+          { label: 'PID_OUT (-255 to 255)', data: Array(maxPoints).fill(0), borderColor: '#ff9800', borderWidth: 1.8, tension: 0.1, pointRadius: 0 },
+          { label: 'Wheel VEL (ticks/s)', data: Array(maxPoints).fill(0), borderColor: '#8bc34a', borderWidth: 1.6, tension: 0.1, pointRadius: 0 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: false, scales: { y: { min: -300, max: 300 } } }
+    });
+
+    const chartEnc = new Chart(document.getElementById("chartEnc"), {
+      type: 'line',
+      data: {
+        labels: [...labels],
+        datasets: [
+          { label: 'ENC_L', data: Array(maxPoints).fill(0), borderColor: '#e91e63', borderWidth: 1.5, pointRadius: 0 },
+          { label: 'ENC_R', data: Array(maxPoints).fill(0), borderColor: '#03a9f4', borderWidth: 1.5, pointRadius: 0 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: false }
+    });
+
+    function addDataPoint(pitch, pid, vel, el, er) {
+      chartPitch.data.datasets[0].data.shift(); chartPitch.data.datasets[0].data.push(pitch);
+      chartPitch.data.datasets[1].data.fill(maxTilt); chartPitch.data.datasets[2].data.fill(-maxTilt);
+      chartPitch.update();
+
+      chartMotor.data.datasets[0].data.shift(); chartMotor.data.datasets[0].data.push(pid);
+      chartMotor.data.datasets[1].data.shift(); chartMotor.data.datasets[1].data.push(vel);
+      chartMotor.update();
+
+      chartEnc.data.datasets[0].data.shift(); chartEnc.data.datasets[0].data.push(el);
+      chartEnc.data.datasets[1].data.shift(); chartEnc.data.datasets[1].data.push(er);
+      chartEnc.update();
+    }
+
+    function clearCharts() {
+      pitchHistory = [];
+      chartPitch.data.datasets[0].data.fill(0);
+      chartMotor.data.datasets[0].data.fill(0);
+      chartMotor.data.datasets[1].data.fill(0);
+      chartEnc.data.datasets[0].data.fill(0);
+      chartEnc.data.datasets[1].data.fill(0);
+      chartPitch.update();
+      chartMotor.update();
+      chartEnc.update();
+    }
+
+    function updateModeBanner() {
+      const banner = document.getElementById("modeBanner");
+      const text = document.getElementById("modeText");
+      if (isLive) {
+        banner.className = "mode-banner mode-live";
+        text.innerHTML = `🟢 LIVE HARDWARE CONNECTED — Streaming Real Telemetry from STM32 Bluepill (115200 Baud)`;
+      } else if (isMock) {
+        banner.className = "mode-banner mode-demo";
+        text.innerHTML = `🟡 DEMO SIMULATION MODE — Running synthetic 5° sine-wave test pattern (not real hardware data). Click 'Connect Web Serial' for live robot data.`;
+      } else {
+        banner.className = "mode-banner mode-disc";
+        text.innerHTML = `⚪ DISCONNECTED — Click "🔌 Connect Web Serial (COM Port)" to stream live hardware data.`;
+      }
+    }
+
+    // Web Serial Connection
+    async function connectSerial() {
+      if (!("serial" in navigator)) {
+        alert("Web Serial API is not supported in this browser. Please use Google Chrome or Microsoft Edge.");
+        return;
+      }
+      try {
+        if (isMock) toggleMock();
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        isLive = true;
+        updateModeBanner();
+        document.getElementById("btnConnect").innerText = "🔌 Connected to Hardware";
+        document.getElementById("btnConnect").style.background = "#2e7d32";
+        readSerialLoop();
+      } catch (err) {
+        console.error("Serial error:", err);
+      }
+    }
+
+    async function readSerialLoop() {
+      const textDecoder = new TextDecoderStream();
+      port.readable.pipeTo(textDecoder.writable);
+      reader = textDecoder.readable.getReader();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        let lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (let line of lines) {
+          parseTelemetryLine(line.trim());
+        }
+      }
+    }
+
+    async function sendCmd(cmd) {
+      if (port && port.writable) {
+        const encoder = new TextEncoder();
+        const writer = port.writable.getWriter();
+        await writer.write(encoder.encode(cmd + "\n"));
+        writer.releaseLock();
+      } else {
+        console.log("Mock Command sent:", cmd);
+        if (cmd === 'C') {
+          alert("Demo Mode: Simulated calibration sent. Connect Web Serial to send real 'C' calibration command to Bluepill.");
+        }
+        if (cmd === 'M') safetyTriggered = false;
+      }
+    }
+
+    function sendInputCmd() {
+      const inp = document.getElementById("cmdInput");
+      if (inp.value) {
+        sendCmd(inp.value);
+        inp.value = "";
+      }
+    }
+
+    // Mock Simulation
+    function toggleMock() {
+      const btn = document.getElementById("btnMock");
+      if (isMock) {
+        clearInterval(mockInterval);
+        isMock = false;
+        btn.innerText = "▶ Simulate Demo Data";
+        btn.style.background = "linear-gradient(135deg, #ff9800, #f57c00)";
+        updateModeBanner();
+      } else {
+        isMock = true;
+        isLive = false;
+        btn.innerText = "⏹ Stop Demo Simulation";
+        btn.style.background = "linear-gradient(135deg, #e53935, #c62828)";
+        updateModeBanner();
+        let t = 0;
+        mockInterval = setInterval(() => {
+          t += 0.05;
+          // Synthetic demo oscillation: 5 * sin(2t)
+          let p = 5 * Math.sin(t * 2) + 0.3 * Math.sin(t * 11);
+          let po = -11.2 * p;
+          let v = 15 * Math.cos(t * 2);
+          encL += Math.round(v * 0.05);
+          encR += Math.round(v * 0.05);
+          let line = `PITCH:${p.toFixed(2)}, PID_OUT:${po.toFixed(2)}, ENC_L:${encL}, ENC_R:${encR}, VEL:${v.toFixed(2)}, KDVEL:0.00, ALPHA:0.98, TILT:35.0`;
+          parseTelemetryLine(line);
+        }, 50);
+      }
+    }
+
+    function parseTelemetryLine(line) {
+      if (line.includes("SAFETY CUTOFF TRIGGERED")) {
+        safetyTriggered = true;
+        return;
+      }
+      // Parse PITCH:.., PID_OUT:..
+      let parts = line.split(",").map(p => p.trim());
+      let data = {};
+      parts.forEach(item => {
+        let [k, v] = item.split(":");
+        if (k && v !== undefined) data[k.trim()] = parseFloat(v.trim());
+      });
+
+      if (data["PITCH"] === undefined) return;
+
+      currentPitch = data["PITCH"];
+      currentPid = data["PID_OUT"] || 0;
+      currentVel = data["VEL"] || 0;
+      encL = Math.round(data["ENC_L"] || 0);
+      encR = Math.round(data["ENC_R"] || 0);
+      currentAlpha = data["ALPHA"] || 0.98;
+      maxTilt = data["TILT"] || 35;
+
+      if (Math.abs(currentPitch) < maxTilt) safetyTriggered = false;
+
+      packetCount++;
+      pitchHistory.push(currentPitch);
+      if (pitchHistory.length > 40) pitchHistory.shift();
+
+      addDataPoint(currentPitch, currentPid, currentVel, encL, encR);
+      drawVisualizer();
+      updateDiagnostics();
+    }
+
+    function drawVisualizer() {
+      const cvs = document.getElementById("visualizerCanvas");
+      const ctx = cvs.getContext("2d");
+      ctx.clearRect(0, 0, cvs.width, cvs.height);
+
+      const cx = cvs.width / 2;
+      const cy = cvs.height - 75;
+
+      // Ground
+      ctx.strokeStyle = "#384157";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(20, cy + 24);
+      ctx.lineTo(cvs.width - 20, cy + 24);
+      ctx.stroke();
+
+      // Wheel
+      ctx.fillStyle = "#1e2433";
+      ctx.strokeStyle = "#00e5ff";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Body Angle
+      const rad = currentPitch * Math.PI / 180;
+      const len = 88;
+      const hx = cx + len * Math.sin(rad);
+      const hy = cy - len * Math.cos(rad);
+
+      let lineColor = (Math.abs(currentPitch) > maxTilt || safetyTriggered) ? "#f44336" : "#00e5ff";
+
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 6;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(hx, hy);
+      ctx.stroke();
+
+      // Chassis Box
+      ctx.fillStyle = "#161b26";
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 2;
+      ctx.fillRect(hx - 20, hy - 12, 40, 24);
+      ctx.strokeRect(hx - 20, hy - 12, 40, 24);
+
+      // Angle display
+      ctx.fillStyle = lineColor;
+      ctx.font = "bold 14px Segoe UI";
+      ctx.fillText(`Pitch: ${currentPitch > 0 ? "+" : ""}${currentPitch.toFixed(2)}°`, 18, 28);
+    }
+
+    function updateDiagnostics() {
+      const now = Date.now();
+      if (now - lastStatTime >= 1000) {
+        let hz = (packetCount * 1000) / (now - lastStatTime);
+        document.getElementById("statHz").innerText = hz.toFixed(1) + " Hz";
+        document.getElementById("modeSub").innerText = `Telemetry Rate: ${hz.toFixed(1)} Hz`;
+        packetCount = 0;
+        lastStatTime = now;
+
+        // Calculate RMS noise
+        if (pitchHistory.length > 5) {
+          let mean = pitchHistory.reduce((a, b) => a + b, 0) / pitchHistory.length;
+          let varSum = pitchHistory.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / pitchHistory.length;
+          let rms = Math.sqrt(varSum);
+          document.getElementById("statNoise").innerText = rms.toFixed(2) + "° σ";
+        }
+      }
+
+      document.getElementById("statAlpha").innerText = currentAlpha.toFixed(2);
+
+      const statusEl = document.getElementById("statStatus");
+      if (safetyTriggered || Math.abs(currentPitch) > maxTilt) {
+        statusEl.innerHTML = `<span class="badge badge-danger">CUTOFF TRIGGERED (Latched OFF)</span>`;
+      } else if (Math.abs(currentPitch) > maxTilt * 0.75) {
+        statusEl.innerHTML = `<span class="badge badge-warn">WARNING (Near Cutoff limit)</span>`;
+      } else {
+        statusEl.innerHTML = `<span class="badge badge-safe">SAFE (Balancing Active)</span>`;
+      }
+    }
+
+    // Initial draw
+    drawVisualizer();
+  </script>
+</body>
+</html>

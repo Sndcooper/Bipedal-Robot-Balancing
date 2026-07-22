@@ -61,11 +61,12 @@ void initAX12Legs() {
 
   for(int i = 0; i < 2; i++) {
     for (uint8_t id : {left_servos[i], right_servos[i]}) {
-      ax12WriteByte(id, 24, 1);  // Torque Enable
-      ax12WriteByte(id, 26, 1);  // CW Compliance Margin (tight inner deadzone)
-      ax12WriteByte(id, 27, 1);  // CCW Compliance Margin
-      ax12WriteByte(id, 28, 16); // CW Compliance Slope (springiness factor)
-      ax12WriteByte(id, 29, 16); // CCW Compliance Slope
+      ax12WriteByte(id, 24, 1);    // Torque Enable
+      ax12WriteWord(id, 34, 1023); // Torque Limit (maximum holding torque)
+      ax12WriteByte(id, 26, 1);    // CW Compliance Margin (tight inner deadzone)
+      ax12WriteByte(id, 27, 1);    // CCW Compliance Margin
+      ax12WriteByte(id, 28, 4);    // CW Compliance Slope (stiffer holding, was 16)
+      ax12WriteByte(id, 29, 4);    // CCW Compliance Slope (stiffer holding, was 16)
     }
     ax12WriteWord(left_servos[i], 30, left_positions[i]);
     ax12WriteWord(right_servos[i], 30, right_positions[i]);
@@ -138,7 +139,11 @@ void handleSerialTuning() {
     else if (input.startsWith("I")) Ki = input.substring(1).toFloat();
     else if (input.startsWith("D")) Kd = input.substring(1).toFloat();
     else if (input.startsWith("O")) pitchOffset = input.substring(1).toFloat();
-    else if (input.startsWith("S")) targetAngle = input.substring(1).toFloat();
+    else if (input == "S") {
+      initAX12Legs();
+      Serial1.println("Servos reset to home position!");
+    }
+    else if (input.startsWith("S") && input.length() > 1) targetAngle = input.substring(1).toFloat();
     else if (input.startsWith("C")) calibrateIMU();
     else if (input.startsWith("M")) { 
       motorsEnabled = !motorsEnabled; 
@@ -153,10 +158,18 @@ void handleSerialTuning() {
   }
 }
 
+// Previous encoder counts, used to derive wheel velocity each loop.
+long prevEncoderLeft = 0;
+long prevEncoderRight = 0;
+
 void setup() {
   Serial1.begin(115200);
-  Serial2.begin(1000000); // AX-12s
   
+  // 2-second delay to allow AX-12+ servos to power up and stabilize before initializing Serial2.
+  // This leaves the UART pins floating/high-impedance during the servo boot sequence to prevent noise.
+  delay(2000);
+  
+  Serial2.begin(1000000); // AX-12s
   initAX12Legs(); // Automatically lock the legs at startup
   
   pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
@@ -182,6 +195,17 @@ void loop() {
   
   readIMU();
   
+  // ── Encoder-derived wheel velocity (ticks/sec & linear velocity) ────────
+  long encL = encoderLeft;
+  long encR = encoderRight;
+  float wheelVelocity = ((float)((encL - prevEncoderLeft) + (encR - prevEncoderRight)) * 0.5) / dt;
+  prevEncoderLeft = encL;
+  prevEncoderRight = encR;
+
+  // 330 ticks per rotation, 67mm wheel diameter -> circumference = PI * 67mm
+  float linearVelMmS = wheelVelocity * (3.14159265f * 67.0f / 330.0f); // mm/s
+  float linearVelMS  = linearVelMmS / 1000.0f; // m/s
+
   // Read Encoders to factor into PID (e.g. cascaded position/speed PID)
   // For now, simple standard balancing PID:
   float error = targetAngle - pitch;
@@ -214,6 +238,9 @@ void loop() {
     Serial1.print("PITCH:"); Serial1.print(pitch); Serial1.print(", ");
     Serial1.print("PID_OUT:"); Serial1.print(output); Serial1.print(", ");
     Serial1.print("ENC_L:"); Serial1.print(encoderLeft); Serial1.print(", ");
-    Serial1.println(encoderRight);
+    Serial1.print("ENC_R:"); Serial1.print(encoderRight); Serial1.print(", ");
+    Serial1.print("VEL:"); Serial1.print(wheelVelocity); Serial1.print(", ");
+    Serial1.print("VEL_MMS:"); Serial1.print(linearVelMmS, 2); Serial1.print(", ");
+    Serial1.print("VEL_MS:"); Serial1.println(linearVelMS, 4);
   }
 }

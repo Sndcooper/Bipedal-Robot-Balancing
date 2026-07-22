@@ -1,0 +1,17 @@
+AX-12 Servo Hardcoded Positions Reference
+=========================================
+
+1. UPRIGHT / STANDING POSITIONS (Original values in main.cpp)
+-------------------------------------------------------------
+Left Servos  (id6, id0):  {818, 818}
+Right Servos (id14, id1): {441, 441}
+
+hardcode: id6=818 id0=818 id14=441 id1=441
+
+
+2. LOWERED / SQUAT POSITIONS (foot x,y = +0.0, -130.0 mm)
+---------------------------------------------------------
+Left Servos  (id6, id0):  {717, 717}
+Right Servos (id14, id1): {541, 541}
+
+hardcode: id6=717 id0=717 id14=541 id1=541

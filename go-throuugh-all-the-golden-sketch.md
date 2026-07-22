@@ -4,7 +4,37 @@
 
 The user built this repo in a single intensive session on 2026-04-12 (all 5 commits landed that day: firmware bring-up, digital-twin IK tooling, PID auto-tuning, and full README documentation), then stepped away for roughly 3 months. They no longer remember the current state and need to be re-oriented before deciding what to do next. The end goal: a bipedal robot (two wheels at the tips of legs, each leg driven by a pair of AX-12 servos via 5-bar linkage) that stands stably without oscillation, using servo compliance as a balance-assist mechanism, and can eventually be remote-controlled to move forward/back/left/right like an RC vehicle. This plan is purely informational/advisory — a status report plus a phased roadmap — no code changes are proposed to be made yet in this turn.
 
-## Part 1 — Where the project actually stands right now
+## Current Status & Rework Architecture (`Balance_Rework`)
+
+Since the initial historical assessment below, Phase A has been **implemented** in a dedicated, safety-first parallel workspace: [`Balance_Rework`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework). The original folders ([`PlatformIO_Firmware`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/PlatformIO_Firmware) and [`Python_Controller_Digital_Twin`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Python_Controller_Digital_Twin)) remain untouched as a historical fallback.
+
+### 1. Active Firmware & Autotuner Features (`Balance_Rework`)
+- **Safety Cutoff Latch**: Automatic motor cutoff and latch-off if tilt exceeds `MAX_SAFE_TILT` (default 35°), preventing wheel spinaway on falls. Requires explicit `M` serial re-enable.
+- **IMU Complementary Filter**: Fuses MPU6050 accelerometer pitch with gyro Y-axis rate (`alpha = 0.98` default, live-tunable via `A`), eliminating tilt lag and noise.
+- **Encoder Velocity Damping**: Subtracts `Kd_vel * wheelVelocity` from the PID output (`V` command), damping drift-driven oscillation.
+- **5-Parameter Serial Tuning & Telemetry**: Live tuning for `P`, `I`, `D`, `V` (`Kd_vel`), `A` (`alpha`), and `T` (`MAX_SAFE_TILT`), streaming telemetry: `PITCH:<v>, PID_OUT:<v>, ENC_L:<v>, ENC_R:<v>, VEL:<v>, KDVEL:<v>, ALPHA:<v>, TILT:<v>`.
+- **Real-Time Diagnostic GUIs**: Includes Python Desktop GUI ([`Balance_Rework/mpu_inspector/mpu_inspector_gui.py`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/mpu_inspector/mpu_inspector_gui.py)) and Web Serial Dashboard ([`Balance_Rework/mpu_inspector/mpu_inspector_web.html`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/mpu_inspector/mpu_inspector_web.html)) displaying an animated physical bipedal robot view, live Matplotlib/Chart.js telemetry graphs, RMS noise (`σ`), update rate (Hz), and interactive serial commands.
+- **Safety-Aware Autotuner (`Balance_Rework/autotuner/`)**: Replaces old MAE/variance objective with [`cost.py`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/autotuner/cost.py) (amplitude, frequency, spectral concentration, time-to-settle), pauses on safety cutoff for physical reset, and performs 3× validation runs on winning gains.
+
+### 2. Hardware Specifications & Reference Summary
+Physical dimensions, linkage geometry, and pin mappings are documented in [`Robot_Specification.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Robot_Specification.md) and [`Hardware_Connections.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Hardware_Connections.md):
+
+| Parameter / Subsystem | Measured / Configured Value | Primary Reference Source |
+|---|---|---|
+| **Body / Chassis Dimensions** | 148 × 118 × 89 mm servo box; 147 mm lower joint span | [`Robot_Specification.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Robot_Specification.md) |
+| **Out-to-Out Wheel Width** | 270 mm (across wheels/shaft/motor assembly) | [`Robot_Specification.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Robot_Specification.md) |
+| **Mass Breakdown (Known Subtotal)** | Total known ≈ 1074 g (Body 300g, LiPo 260g, 4× AX-12 214g, 2× Motors 300g) | [`Robot_Specification.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Robot_Specification.md) |
+| **5-Bar Leg Linkage Geometry** | Femur 55 mm, Tibia 100 mm, Leg separation 180 mm | [`Robot_Specification.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Robot_Specification.md) |
+| **AX-12 Servos (4x)** | Leg 1: IDs 6 (L), 14 (R); Leg 2: IDs 0 (L), 1 (R) | [`Robot_Specification.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Robot_Specification.md) |
+| **Wheel Motors & Encoders** | 65 mm diameter wheels; L Motor (PA1/PB14/PB15), R Motor (PA0/PB12/PB13) | [`Hardware_Connections.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Hardware_Connections.md) |
+| **IMU (MPU6050/9250)** | I2C1 (PB6=SCL, PB7=SDA); Gyro Y-axis rate fusion | [`Hardware_Connections.md`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Hardware_Connections.md) |
+
+### 3. Immediate Next Milestone
+- **Phase A Physical Hardware Tuning & Validation**: Flash [`Balance_Rework/firmware`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/firmware), verify IMU gyro sign via serial monitor, suspend robot in safety harness, and execute [`Balance_Rework/autotuner/autotune.py`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/autotuner/autotune.py) to converge on real-world stable gains (`Kp, Ki, Kd, Kd_vel, alpha`).
+
+---
+
+## Part 1 — Historical Baseline Analysis (Original Codebase State)
 
 **Hardware**: STM32 "Bluepill" (STM32F103C8) is the brain, talking to an MPU6050 IMU over I2C, two DC wheel motors with quadrature encoders via H-bridge, and 4 AX-12+ Dynamixel servos (2 per leg, 5-bar linkage) over a half-duplex USART2 hack, all powered from a 12V LiPo. Full pinout is in `Hardware_Connections.md`.
 
@@ -30,11 +60,11 @@ The user built this repo in a single intensive session on 2026-04-12 (all 5 comm
 
 Principle: smallest change that reduces wobble first, validated on hardware, before adding complexity. Don't touch the servo/IK merge until standing balance is solid — you won't be able to tell which change caused which effect otherwise.
 
-### Phase A — Kill the wobble (`PlatformIO_Firmware/src/main.cpp` only)
-1. **Apply the already-tuned gains** (line 32): `Kp=11.21, Ki=0.0, Kd=0.715` instead of the stale `20.0/0.5/1.0` defaults. Free, immediate, do this first as the new baseline.
-2. **Add gyro fusion** to `readIMU()` (~line 83): pull gyro registers (0x43–0x48) via the same I2C burst read already in place, and blend with a simple complementary filter (`pitch = alpha*(pitch + gyroRate*dt) + (1-alpha)*accelPitch`, alpha ≈ 0.95–0.98). This directly targets the noisy/laggy tilt estimate that's likely amplifying oscillation through the D-term.
-3. **Add encoder-derived velocity damping** (loop, ~line 185): compute wheel velocity from the already-counted `encoderLeft/Right` and subtract a damping term from PID output (`output -= Kd_vel * wheelVelocity`) — a light touch that addresses drift-driven oscillation without a full cascaded-PID redesign.
-4. **Re-run `autotune.py`** against the updated firmware (velocity damping changes the system dynamics enough that old gains are stale), save a new session JSON, and copy the new values into `main.cpp` — this time actually closing the loop.
+### Phase A — Kill the wobble (**STATUS: CODE IMPLEMENTED IN `Balance_Rework` — NEXT STEP: HARDWARE TUNING**)
+1. **[DONE] Safety Cutoff**: Implemented automatic tilt cutoff (`MAX_SAFE_TILT`) and latch-off in [`Balance_Rework/firmware/src/main.cpp`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/firmware/src/main.cpp).
+2. **[DONE] Add gyro fusion**: Implemented complementary filter (`alpha`) fusing accelerometer pitch with gyro Y-axis rate in [`Balance_Rework/firmware/src/main.cpp`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/firmware/src/main.cpp).
+3. **[DONE] Add encoder-derived velocity damping**: Implemented wheel velocity computation and damping term (`Kd_vel * wheelVelocity`) subtracted from PID output.
+4. **[IMMEDIATE NEXT STEP] Physical Hardware Autotuning**: Suspend robot on harness and run [`Balance_Rework/autotuner/autotune.py`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/autotuner/autotune.py) to converge on and flash optimal 5-parameter gains.
 
 ### Phase B — Unify the firmware split
 Merge `test/digitaltwin_current.cpp`'s command-parsing layer (`POS/SPD/TRQ/TEN/LED/CMG/CSL/MOT`) into `main.cpp`'s `handleSerialTuning()` dispatch (they operate on separate subsystems — servos vs. balance PID — so they coexist fine). Retire the duplicate packet-writer in `main.cpp` (lines 39–53) in favor of the test file's version. Make `initAX12Legs()` set an initial safe pose but leave compliance margin/slope runtime-adjustable via the merged `CMG`/`CSL` commands instead of hardcoded constants — this is the hook Phase C needs. Align `ax12_protocol.py` to whichever command framing survives. Once validated, archive `test/digitaltwin_current.cpp` so there's no ambiguity about which file is "the" firmware.
@@ -51,17 +81,15 @@ Only after A–C produce stable standing. No new control theory needed:
 
 ### Summary table
 
-| Phase | File(s) | Change |
-|---|---|---|
-| A1 | `main.cpp:32` | Apply tuned gains 11.21/0.0/0.715 |
-| A2 | `main.cpp:83` (`readIMU`) | Add gyro read + complementary filter |
-| A3 | `main.cpp:185` (`loop`) | Add encoder velocity damping term |
-| A4 | `python tuner/autotune.py` | Re-tune, save new session, copy gains back |
-| B | `main.cpp` + `test/digitaltwin_current.cpp` | Merge command parser + packet writer; retire duplicates |
-| B | `digital_tests/ax12_protocol.py` | Align framing to merged protocol |
-| C | `main.cpp` | Low-rate compliance state machine driven by error/output variance |
-| D | `main.cpp` | Live `targetAngle` + turn bias RC input with watchdog; differential `setMotors` |
-| D | new small Python script | Minimal directional jog sender against current protocol |
+| Phase | Status | File(s) | Change |
+|---|---|---|---|
+| **A1–A3** | **[DONE] Implemented** | [`Balance_Rework/firmware/src/main.cpp`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/firmware/src/main.cpp) | Added automatic safety tilt cutoff, IMU gyro complementary filter (`alpha`), and encoder velocity damping (`Kd_vel`) |
+| **A4** | **[IMMEDIATE NEXT STEP]** | [`Balance_Rework/autotuner/autotune.py`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/autotuner/autotune.py) | Run 5-parameter safety-aware autotuner on suspended physical robot & apply validated gains |
+| **B** | Planned | `firmware/src/main.cpp` + legacy test files | Merge fuller AX-12 servo command parser (`POS/SPD/TRQ/CMG/CSL`) into main firmware loop |
+| **B** | Planned | `digital_tests/ax12_protocol.py` | Align Python framing to merged command protocol |
+| **C** | Planned | `firmware/src/main.cpp` | Low-rate compliance state machine (`CMG`/`CSL`) driven by disturbance variance |
+| **D** | Planned | `firmware/src/main.cpp` | Live `targetAngle` + turn bias RC input with watchdog; differential `setMotors` |
+| **D** | Planned | new directional jog script | Minimal directional jog sender against merged protocol |
 
 ## Verification approach
 Each phase is a single flash-and-test cycle on the physical robot (supported off the ground first per the firmware README's PWM-surge warning, then hand-held/tethered standing tests). Use the existing serial telemetry (`PITCH:`, `PID_OUT:`, `ENC_L/R:`) and `autotune.py`'s cost function as the objective measure of "is wobble actually decreasing" rather than relying on visual judgment alone. No unit-testable code exists in this embedded context — validation is physical, incremental, and reversible (git commit after each phase so you can roll back if a change makes things worse).
