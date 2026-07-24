@@ -1,0 +1,17 @@
+{
+    "Kp": 78.0,
+    "Kd": 0.0,
+    "Kd_vel": 0.0,
+    "alpha": 0.96,
+    "targetAngle": 0.0,
+    "pitchOffset": 0.0,
+    "maxSafeTilt": 25.0,
+    "fx1": 3.0,
+    "fy1": -150.4,
+    "fx2": -3.0,
+    "fy2": -149.6,
+    "dist": 180.0,
+    "trq_limit": 511.0,
+    "cmp_margin": 4.0,
+    "cmp_slope": 32.0
+}
