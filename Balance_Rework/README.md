@@ -11,6 +11,7 @@ It exists as a **parallel workspace** so the originals stay untouched as a fallb
 - `Balance_Rework/autotuner/` — a new, safety-aware, 5-parameter PID tuning tool.
 - `Balance_Rework/mpu_inspector/mpu_inspector_gui.py` — Python Desktop GUI Diagnostic tool with animated physical bipedal robot view, real-time Matplotlib charts, signal noise diagnostics (`σ`), and built-in simulation mode (`--mock`).
 - `Balance_Rework/mpu_inspector/mpu_inspector_web.html` — Standalone HTML5 Web Serial GUI Dashboard (open in Chrome/Edge, zero install needed).
+- `Balance_Rework/tuner_legcontrol/` — The ultimate unified GUI and firmware combining the PID balancer with live Inverse Kinematics (IK) for the AX-12 legs, velocity smoothing (EMA filter), and servo health monitoring.
 
 Nothing here changes wiring: the pin map is identical to the root `Hardware_Connections.md`.
 
@@ -139,3 +140,21 @@ committing to a flash.
 > **Safety reminders:** motors only run while `M` is enabled; the firmware latches OFF on
 > a fall and needs an explicit `M` (the autotuner handles this for you); and the tool
 > always zeroes gains and disables motors on exit, Ctrl-C, or crash.
+
+---
+
+## 4. Unified Tuner & Leg Control (`tuner_legcontrol/`)
+
+This folder contains the latest evolution of the project: integrating the balancing loop with the AX-12 leg inverse kinematics.
+
+### Key Firmware Features (`firmware/src/main.cpp`)
+- **Velocity EMA Low-Pass Filter**: A highly-optimized Exponential Moving Average filter (`velFilterAlpha = 0.15`) smooths the raw encoder velocity readings at 100Hz. This eliminates high-frequency quantization spikes ("Tk Tk Tk" chatter) when applying `Kd_vel` damping.
+- **Strict Anti-Windup**: The PID integral term is robustly locked to `0.0` whenever the motors are disabled (or during a safety cutoff). Furthermore, the applied `Ki` instantly drops to `0.0` when motors are off, preventing any latent wind-up jerks upon re-enabling.
+- **Non-Blocking Serial Protocol**: Supports high-frequency legacy PID tuning (`P`, `I`, `D`, `V`, etc.) alongside high-bandwidth multi-byte leg commands (`POS,id,val`, `TRQ,id,limit`, `CMP,id,margin,slope`) without choking the 100Hz balance loop.
+- **Half-Duplex Echo Discarding**: Features a precise 10k-resistor hack workaround for the AX-12 UART that mathematically predicts and clears exactly 8 bytes of physical loopback echo before reading servo health diagnostics.
+
+### Unified GUI (`gui/main_gui.py`)
+- **Tab 1: Balance Tuner**: Live PID and telemetry charts. Includes a **"Reset Integral"** button, and parameter sliders specifically scaled for aggressive tuning (e.g., `Ki` up to 1000).
+- **Tab 2: Kinematics & Health**: A 2D Matplotlib Digital Twin that solves bipedal Inverse Kinematics (IK) in real-time. When connected, dragging the foot `X/Y` sliders directly moves the physical AX-12 servos.
+- **Live Health Diagnostics**: Background thread seamlessly polls the AX-12 servos for Load and Temperature, flashing red if a leg actuator crosses the 65°C danger threshold.
+- **Profile Saving**: A **"Save Params"** button writes the complete current state of both the PID gains and leg IK geometry into a timestamped JSON file under `gui/profiles/`.
