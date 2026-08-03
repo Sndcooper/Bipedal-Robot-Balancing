@@ -37,20 +37,21 @@ class ParamSpec:
 PARAM_SPECS = [
     ParamSpec("Kp", "Kp", 0.0, 200.0, 0.1, 5.0, 0.01, 3, "gain", 78.0),
     ParamSpec("Ki", "Ki", 0.0, 1000.0, 0.5, 1.0, 0.001, 4, "gain", 0.0),
-    ParamSpec("Kd", "Kd", 0.0, 50.0, 0.1, 10.0, 0.01, 3, "gain", 0.0),
-    ParamSpec("Kp_straight", "Kp STR", 0.0, 5.0, 0.05, 0.5, 0.01, 3, "gain", 0.0),
+    ParamSpec("Kd", "Kd", 0.0, 10.0, 0.1, 5.0, 0.01, 3, "gain", 0.0),
     ParamSpec("alpha", "alpha", 0.80, 0.999, 0.001, 0.02, 0.0001, 4, "gain", 0.96),
     ParamSpec("targetAngle", "Target", -20.0, 20.0, 0.1, 5.0, 0.01, 3, "target", 0.0),
+    ParamSpec("pitchOffset", "Offset", -20.0, 20.0, 0.1, 5.0, 0.01, 3, "offset", 0.0),
     ParamSpec("maxSafeTilt", "Tilt", 5.0, 50.0, 0.1, 5.0, 0.01, 2, "tilt", 25.0),
 ]
 
 # --- Kinematics & Compliance Specs ---
 IK_PARAM_SPECS = [
-    ParamSpec("fx1", "Leg1 X", -100.0, 100.0, 1.0, 10.0, 0.1, 1, "ik", 1.0),
-    ParamSpec("fy1", "Leg1 Y", -160.0, -20.0, 1.0, 10.0, 0.1, 1, "ik", -151.1),
-    ParamSpec("fx2", "Leg2 X", -100.0, 100.0, 1.0, 10.0, 0.1, 1, "ik", -6.0),
-    ParamSpec("fy2", "Leg2 Y", -160.0, -20.0, 1.0, 10.0, 0.1, 1, "ik", -149.6),
+    ParamSpec("fx1", "Leg1 X", -100.0, 100.0, 1.0, 10.0, 0.1, 1, "ik", 0.0),
+    ParamSpec("fy1", "Leg1 Y", -160.0, -20.0, 1.0, 10.0, 0.1, 1, "ik", -157.0),
+    ParamSpec("fx2", "Leg2 X", -100.0, 100.0, 1.0, 10.0, 0.1, 1, "ik", 0.0),
+    ParamSpec("fy2", "Leg2 Y", -160.0, -20.0, 1.0, 10.0, 0.1, 1, "ik", -157.0),
     ParamSpec("dist", "Leg Dist", 100.0, 250.0, 1.0, 20.0, 0.1, 1, "ik", 180.0),
+    ParamSpec("lean", "Body Lean", -45.0, 45.0, 1.0, 10.0, 0.1, 1, "ik", 0.0),
 ]
 
 CMD_PARAM_SPECS = [
@@ -300,7 +301,6 @@ class BalanceTunerTab(ttk.Frame):
             if key == "Kp": self.app.link.set_kp(val)
             elif key == "Ki": self.app.link.set_ki(val)
             elif key == "Kd": self.app.link.set_kd(val)
-            elif key == "Kp_straight": self.app.link.set_kp_straight(val)
             elif key == "alpha": self.app.link.set_alpha(val)
             elif key == "targetAngle": self.app.link.set_target(val)
             elif key == "pitchOffset": self.app.link.set_offset(val)
@@ -434,9 +434,18 @@ class LegTwinTab(ttk.Frame):
         x2 = self.sliders["fx2"].get_value()
         y2 = self.sliders["fy2"].get_value()
         dist = self.sliders["dist"].get_value()
+        lean = self.sliders["lean"].get_value() if "lean" in self.sliders else 0.0
 
-        sol1 = tkin.solve_ik(x1, y1, 0.0)
-        sol2 = tkin.solve_ik(x2 + dist, y2, dist)
+        import math
+        rad = math.radians(-lean)
+        c, s = math.cos(rad), math.sin(rad)
+        rx1 = x1 * c - y1 * s
+        ry1 = x1 * s + y1 * c
+        rx2 = x2 * c - y2 * s
+        ry2 = x2 * s + y2 * c
+
+        sol1 = tkin.solve_ik(rx1, ry1, 0.0)
+        sol2 = tkin.solve_ik(rx2 + dist, ry2, dist)
         positions_to_send = {}
 
         if sol1:
@@ -476,7 +485,7 @@ class LegTwinTab(ttk.Frame):
     def _on_ik_change(self, key, value):
         if self.mirror_var.get() and key != "init":
             if key == "fx1":
-                self.sliders["fx2"].set_value(-value, send=False)
+                self.sliders["fx2"].set_value(value, send=False)
             elif key == "fy1":
                 self.sliders["fy2"].set_value(value, send=False)
 
@@ -485,10 +494,19 @@ class LegTwinTab(ttk.Frame):
         x2 = self.sliders["fx2"].get_value()
         y2 = self.sliders["fy2"].get_value()
         dist = self.sliders["dist"].get_value()
+        lean = self.sliders["lean"].get_value() if "lean" in self.sliders else 0.0
+
+        import math
+        rad = math.radians(-lean)
+        c, s = math.cos(rad), math.sin(rad)
+        rx1 = x1 * c - y1 * s
+        ry1 = x1 * s + y1 * c
+        rx2 = x2 * c - y2 * s
+        ry2 = x2 * s + y2 * c
 
         # Solve IK using your existing twin_kinematics library
-        sol1 = tkin.solve_ik(x1, y1, 0.0)
-        sol2 = tkin.solve_ik(x2 + dist, y2, dist)
+        sol1 = tkin.solve_ik(rx1, ry1, 0.0)
+        sol2 = tkin.solve_ik(rx2 + dist, ry2, dist)
 
         positions_to_send = {}
 
@@ -496,8 +514,8 @@ class LegTwinTab(ttk.Frame):
         if sol1:
             self.leg1_arts[0].set_data([tkin.SERVO_L[0], sol1["Knee_L"][0]], [tkin.SERVO_L[1], sol1["Knee_L"][1]])
             self.leg1_arts[1].set_data([tkin.SERVO_R[0], sol1["Knee_R"][0]], [tkin.SERVO_R[1], sol1["Knee_R"][1]])
-            self.leg1_arts[2].set_data([sol1["Knee_L"][0], x1], [sol1["Knee_L"][1], y1])
-            self.leg1_arts[3].set_data([sol1["Knee_R"][0], x1], [sol1["Knee_R"][1], y1])
+            self.leg1_arts[2].set_data([sol1["Knee_L"][0], rx1], [sol1["Knee_L"][1], ry1])
+            self.leg1_arts[3].set_data([sol1["Knee_R"][0], rx1], [sol1["Knee_R"][1], ry1])
             
             p6 = tkin.map_angle_to_ax12(sol1["Angle_L"], is_left=True, is_leg2=False)
             p14 = tkin.map_angle_to_ax12(sol1["Angle_R"], is_left=False, is_leg2=False)
@@ -509,8 +527,8 @@ class LegTwinTab(ttk.Frame):
             lx, rx = tkin.SERVO_L[0] + dist, tkin.SERVO_R[0] + dist
             self.leg2_arts[0].set_data([lx, sol2["Knee_L"][0]], [tkin.SERVO_L[1], sol2["Knee_L"][1]])
             self.leg2_arts[1].set_data([rx, sol2["Knee_R"][0]], [tkin.SERVO_R[1], sol2["Knee_R"][1]])
-            self.leg2_arts[2].set_data([sol2["Knee_L"][0], x2 + dist], [sol2["Knee_L"][1], y2])
-            self.leg2_arts[3].set_data([sol2["Knee_R"][0], x2 + dist], [sol2["Knee_R"][1], y2])
+            self.leg2_arts[2].set_data([sol2["Knee_L"][0], rx2 + dist], [sol2["Knee_L"][1], ry2])
+            self.leg2_arts[3].set_data([sol2["Knee_R"][0], rx2 + dist], [sol2["Knee_R"][1], ry2])
             
             ikL2, ikR2 = sol2["Angle_L"], sol2["Angle_R"]
             if tkin.LEG2_INVERTED_MOUNT:
@@ -526,8 +544,22 @@ class LegTwinTab(ttk.Frame):
         # Send IK to Firmware (Throttled automatically when connected)
         now = time.time()
         if self.app.link and self.app.link.ser and (now - self.last_send_time > self.SEND_INTERVAL):
-            for sid, pos in positions_to_send.items():
-                self.app.link.send_leg_position(sid, pos)
+            if key in ("fx1", "fy1", "init"):
+                self.app.link.send_ik1(x1, y1)
+                if self.mirror_var.get():
+                    self.app.link.send_ik2(x2, y2)
+            if key in ("fx2", "fy2", "init"):
+                self.app.link.send_ik2(x2, y2)
+            if key in ("dist", "init"):
+                self.app.link.send_ikd(dist)
+            if key in ("lean", "init"):
+                self.app.link.send_ikl(lean)
+            if key == "mirror":
+                self.app.link.send_ik1(x1, y1)
+                self.app.link.send_ik2(x2, y2)
+                self.app.link.send_ikd(dist)
+                self.app.link.send_ikl(lean)
+                
             self.last_send_time = now
 
     def _on_cmd_change(self, key, value):
@@ -581,8 +613,6 @@ class BipedTunerApp(tk.Tk):
         
         # Global tracking variable for the falling angle
         self.pitch_var = tk.StringVar(value="Angle: --°")
-        self.offset_var = tk.StringVar(value="Offset: --")
-        self.offset_entry_var = tk.StringVar(value="0.0")
 
         self._build_header()
         
@@ -609,14 +639,6 @@ class BipedTunerApp(tk.Tk):
         ttk.Button(top, text="Motors On/Off", command=self.toggle_motors).pack(side=tk.LEFT, padx=15)
         ttk.Button(top, text="Safety Reset", command=self.safety_reset).pack(side=tk.LEFT, padx=2)
         ttk.Button(top, text="Calibrate IMU", command=self.calibrate).pack(side=tk.LEFT, padx=2)
-
-        # Manual Offset UI
-        calib_frame = ttk.Frame(top)
-        calib_frame.pack(side=tk.LEFT, padx=10)
-        ttk.Label(calib_frame, textvariable=self.offset_var, width=12).pack(side=tk.LEFT)
-        ttk.Entry(calib_frame, textvariable=self.offset_entry_var, width=6).pack(side=tk.LEFT, padx=2)
-        ttk.Button(calib_frame, text="Set Offset", command=self.set_manual_offset).pack(side=tk.LEFT)
-
         ttk.Button(top, text="Reset Integral", command=self.reset_integral).pack(side=tk.LEFT, padx=2)
         ttk.Button(top, text="Save Params", command=self.save_params).pack(side=tk.LEFT, padx=10)
         
@@ -634,7 +656,7 @@ class BipedTunerApp(tk.Tk):
         if self.link: return
         port = self.port_var.get()
         try:
-            self.link = SerialLink(port, baud=115200)
+            self.link = SerialLink(port, baud=500000)
             self.link.connect()
             self.status_var.set(f"Connected to {port}")
         except Exception as exc:
@@ -656,15 +678,6 @@ class BipedTunerApp(tk.Tk):
 
     def calibrate(self):
         if self.link: self.link.calibrate()
-
-    def set_manual_offset(self):
-        if self.link:
-            try:
-                val = float(self.offset_entry_var.get())
-                self.link.set_offset(val)
-                self.status_var.set(f"Sent manual offset: {val}")
-            except ValueError:
-                self.status_var.set("Invalid offset value")
 
     def reset_integral(self):
         if self.link: self.link.reset_integral()
@@ -706,12 +719,6 @@ class BipedTunerApp(tk.Tk):
                 self.pitch_var.set(f"Angle: {current_pitch:+.2f}°")
             else:
                 self.pitch_var.set("Angle: --°")
-
-            offset_val = self.link.fw.get("pitchOffset")
-            if offset_val is not None:
-                self.offset_var.set(f"Offset: {offset_val:.2f}")
-            else:
-                self.offset_var.set("Offset: --")
             
             # Delegate updates to the active tab to save CPU
             active_tab = self.notebook.index(self.notebook.select())

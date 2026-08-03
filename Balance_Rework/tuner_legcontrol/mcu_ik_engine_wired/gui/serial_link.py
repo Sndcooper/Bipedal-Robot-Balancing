@@ -11,7 +11,7 @@ except ImportError:
     serial = None
 
 class SerialLink:
-    def __init__(self, port="COM3", baud=115200):
+    def __init__(self, port="COM3", baud=500000):
         self.port = port
         self.baud = baud
         self.ser = None
@@ -140,16 +140,6 @@ class SerialLink:
 
     def _parse_fw_update(self, line):
         """Parses: Updated -> P:11.2 I:0.0 ..."""
-        KEY_MAP = {
-            "P": "Kp",
-            "I": "Ki",
-            "D": "Kd",
-            "STR": "Kp_straight",
-            "Offset": "pitchOffset",
-            "Target": "targetAngle",
-            "Alpha": "alpha",
-            "Tilt": "maxSafeTilt"
-        }
         try:
             _, payload = line.split("->", 1)
             parts = payload.split()
@@ -157,9 +147,7 @@ class SerialLink:
             for p in parts:
                 if ':' in p:
                     k, v = p.split(':', 1)
-                    k_clean = k.strip()
-                    k_mapped = KEY_MAP.get(k_clean, k_clean)
-                    new_fw[k_mapped] = float(v.strip())
+                    new_fw[k.strip()] = float(v.strip())
             with self._lock:
                 self.fw.update(new_fw)
         except Exception:
@@ -201,10 +189,10 @@ class SerialLink:
     def set_kp(self, val): self._send(f"P{val}")
     def set_ki(self, val): self._send(f"I{val}")
     def set_kd(self, val): self._send(f"D{val}")
-    def set_kp_straight(self, val): self._send(f"STR{val}")
+    def set_kd_vel(self, val): self._send(f"V{val}")
     def set_alpha(self, val): self._send(f"A{val}")
     def set_target(self, val): self._send(f"S{val}")
-    def set_offset(self, val): self._send(f"O{val}")
+    def set_offset(self, val): pass # Offset is handled via Calibration
     def set_tilt(self, val): self._send(f"T{val}")
     
     def set_gains(self, p, i, d, v, a):
@@ -225,6 +213,18 @@ class SerialLink:
     def send_leg_position(self, servo_id, pos):
         """Sends: POS,6,717"""
         self._send(f"POS,{servo_id},{int(pos)}")
+
+    def send_ik1(self, fx, fy):
+        self._send(f"IK1,{fx:.2f},{fy:.2f}")
+
+    def send_ik2(self, fx, fy):
+        self._send(f"IK2,{fx:.2f},{fy:.2f}")
+
+    def send_ikd(self, dist):
+        self._send(f"IKD,{dist:.2f}")
+
+    def send_ikl(self, lean):
+        self._send(f"IKL,{lean:.2f}")
 
     def send_torque_limit(self, servo_id, limit):
         """Sends: TRQ,6,1023"""
