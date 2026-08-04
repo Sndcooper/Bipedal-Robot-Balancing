@@ -98,13 +98,15 @@ struct ServoState {
   uint16_t torqueLimit;
   uint8_t  compMargin;
   uint8_t  compSlope;
+  uint8_t  temp;
+  float    loadPct;
 };
 
 ServoState legServos[4] = {
-  {6,  818, 511, 4, 32},
-  {0,  818, 511, 4, 32},
-  {14, 441, 511, 4, 32},
-  {1,  441, 511, 4, 32},
+  {6,  818, 511, 4, 32, 0, 0.0f},
+  {0,  818, 511, 4, 32, 0, 0.0f},
+  {14, 441, 511, 4, 32, 0, 0.0f},
+  {1,  441, 511, 4, 32, 0, 0.0f},
 };
 
 void initAX12Legs() {
@@ -252,11 +254,8 @@ void pollLegServosTask() {
         uint8_t  temp    = reply[8];
         float    loadPct = ((loadRaw & 0x3FF) / 1023.0f) * 100.0f;
 
-        char buf[32];
-        uint8_t len = (uint8_t)snprintf(buf, sizeof(buf), "SRV:%d,%d,%.1f\n",
-          legServos[currentServoIdx].id, temp, loadPct);
-        if (Serial3.availableForWrite() >= len)
-          Serial3.write((uint8_t*)buf, len);
+        legServos[currentServoIdx].temp = temp;
+        legServos[currentServoIdx].loadPct = loadPct;
       }
 
       currentServoIdx = (currentServoIdx + 1) % 4;
@@ -486,11 +485,17 @@ void setup() {
 void loop() {
   unsigned long now = micros();
   if (now - lastTime < 10000) return; // enforce 100 Hz
-  float dt = (now - lastTime) * 1.0e-6f;
+  static unsigned long dt_us = 10000;
+  dt_us = now - lastTime;
+  float dt = dt_us * 1.0e-6f;
   lastTime = now;
 
+  unsigned long bodyStart = micros();
+
   // ── IMU ────────────────────────────────────────────────────────────────
+  unsigned long imuStart = micros();
   readIMU(dt);
+  unsigned long imuTime = micros() - imuStart;
 
   // ── SAFETY CUTOFF ───────────────────────────────────────────────────────
   if (fabsf(pitch) > maxSafeTilt && motorsEnabled) {
@@ -535,22 +540,35 @@ void loop() {
   static bool isReadCycle = false;
   isReadCycle = !isReadCycle;
 
+  unsigned long servoTime = 0;
+  unsigned long rxTime = 0;
+
   if (isReadCycle) {
+    unsigned long t = micros();
     pollLegServosTask();
+    servoTime = micros() - t;
   } else {
+    unsigned long t = micros();
     handleTelemetryRX(); // 40 µs hard budget
+    rxTime = micros() - t;
   }
 
   // ── TELEMETRY TX @ 20 Hz (non-blocking) ────────────────────────────────
   if (now - lastPrintTime >= 50000) {
     lastPrintTime = now;
-    static char telem[160];
-    uint8_t len = (uint8_t)snprintf(telem, sizeof(telem),
-      "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,ALPHA:%.4f,TILT:%.1f,MOT:%d,LAT:%d\n",
-      pitch, output, integral, encL, encR,
-      alpha, maxSafeTilt, (int)motorsEnabled, (int)safetyLatched);
-    if (Serial3.availableForWrite() >= len)
-      Serial3.write((uint8_t*)telem, len);
-    // Buffer full → skip silently; GUI picks it up next 20 Hz tick
+
+    // Send ultra-compact telemetry (fits in 64B UART buffer for ~0ms delay)
+    static uint32_t seq = 0;
+    Serial3.print("S:");     Serial3.print(seq++);
+    Serial3.print(",DT:");   Serial3.print(dt_us);
+    Serial3.print(",P:");    Serial3.print(pitch, 2);
+    Serial3.print(",PO:");   Serial3.print(output, 2);
+    Serial3.print(",I:");    Serial3.print(integral, 4);
+    Serial3.print(",EL:");   Serial3.print(encL);
+    Serial3.print(",ER:");   Serial3.print(encR);
+    Serial3.print(",A:");    Serial3.print(alpha, 2);
+    Serial3.print(",T:");    Serial3.print(maxSafeTilt, 1);
+    Serial3.print(",M:");    Serial3.print(motorsEnabled);
+    Serial3.print(",L:");    Serial3.println(safetyLatched);
   }
 }

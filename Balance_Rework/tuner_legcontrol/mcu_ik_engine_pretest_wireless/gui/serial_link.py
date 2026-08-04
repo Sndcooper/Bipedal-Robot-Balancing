@@ -104,7 +104,7 @@ class SerialLink:
             if len(self.raw_log) > 1000:
                 self.raw_log.pop(0)
 
-        if "PITCH:" in line or ",P:" in line or line.startswith("P:"):
+        if line.startswith("PITCH:"):
             self._parse_telemetry(line)
         elif line.startswith("SRV:"):
             self._parse_servo_health(line)
@@ -130,7 +130,7 @@ class SerialLink:
                 pass
 
     def _parse_telemetry(self, line):
-        """Parses: PITCH:1.23,PID_OUT:-4.5,INT:0.01,... or P:1.23,PO:-4.5,I:0.01,..."""
+        """Parses: PITCH:1.23,PID_OUT:-4.5,INT:0.01,EL:100,ER:105,..."""
         data = {}
         for part in line.split(","):
             if ":" in part:
@@ -142,17 +142,16 @@ class SerialLink:
 
         with self._lock:
             self.history["t"].append(time.time() - self.start_time)
-            self.history["pitch"].append(data.get("PITCH", data.get("P", 0.0)))
-            self.history["pid_out"].append(data.get("PID_OUT", data.get("PO", 0.0)))
-            self.history["vel"].append(data.get("VEL", data.get("V", 0.0)))
+            self.history["pitch"].append(data.get("PITCH", 0.0))
+            self.history["pid_out"].append(data.get("PID_OUT", 0.0))
+            self.history["vel"].append(data.get("VEL", 0.0))
             self.history["enc_l"].append(data.get("EL", 0.0))
             self.history["enc_r"].append(data.get("ER", 0.0))
-            self.history["integral"].append(data.get("INT", data.get("I", 0.0)))
+            self.history["integral"].append(data.get("INT", 0.0))
 
             # Sync motor/latch state from embedded flags
-            mot = data.get("MOT", data.get("M", None))
-            if mot is not None:
-                self.motors_on = bool(int(mot))
+            if "MOT" in data:
+                self.motors_on = bool(int(data["MOT"]))
 
             # Cap history to 500 samples
             if len(self.history["t"]) > 500:
