@@ -1,94 +1,114 @@
-# Bipedal Robot - Hardware Connections Guide
+# Bipedal Robot - Master Hardware Connections & Wiring Guide
 
-This document outlines the hardware wiring and connections for the STM32-based Bipedal Robot, including the AX-12+ Servos, DC Motors with Encoders, and the MPU (Gyro/Accelerometer).
+This document outlines the complete hardware wiring and electrical pinouts for the STM32-based Self-Balancing Bipedal Robot, including the Dynamixel AX-12+ Servos, L298N DC Motor Drivers with Quadrature Encoders, MPU6050 IMU, 3DR Wireless Telemetry Radio, and FlySky FS-iA10B iBUS RC Receiver.
+
+---
 
 ## 1. Power Distribution
-**WARNING:** Ensure all grounds (GND) are connected together across all boards and power supplies!
-*   **AX-12+ Servos:** 11.1V - 12V DC (Use a dedicated LiPo battery or high-current power supply).
-*   **DC Motor Driver (e.g., L298N / TB6612FNG):** 12V to VMOT/VCC.
-*   **STM32:** 5V (via 5V pin) or 3.3V, depending on your BEC/Step-down module.
-*   **MPU (6050 / 9250):** 3.3V or 5V (Check your specific module's VCC pin requirement).
-*   **Encoders:** Typically 5V or 3.3V for the Hall sensors.
+
+> [!WARNING]
+> **COMMON GROUND MANDATE:** Ensure all ground (GND) lines are tied together across all power supplies, STM32 board, motor drivers, radio modules, and RC receivers!
+
+* **AX-12+ Smart Servos:** 11.1V – 12.0V DC (Dedicated high-current LiPo battery).
+* **DC Motor Driver (L298N / TB6612FNG):** 12.0V DC to `VCC`/`VMOT`.
+* **STM32 Bluepill:** 5.0V (via 5V pin from BEC step-down) or 3.3V logic.
+* **MPU6050 IMU:** 3.3V (VCC pin connected to 3.3V logic supply).
+* **3DR Telemetry Radio:** 3.3V / 5V VCC to radio module.
+* **FlySky FS-iA10B Receiver:** 5V supply from BEC / motor driver 5V rail.
 
 ---
 
-## 2. PC Communication (Serial1)
-Used to communicate with the Python Digital Twin.
-*   **PA9 (TX):** Connect to USB-TTL Adapter RX
-*   **PA10 (RX):** Connect to USB-TTL Adapter TX
-*   **GND:** Connect to USB-TTL Adapter GND
+## 2. Serial Communication Architecture (USART 1, 2 & 3)
+
+The STM32 Bluepill utilizes all three hardware serial peripherals for dedicated real-time control streams:
+
+```
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                            STM32F103C8T6                                │
+  │                                                                         │
+  │  [USART1]  PA9 (TX1) / PA10 (RX1) ───►  FlySky FS-iA10B iBUS (115.2k)    │
+  │                                         OR USB-FTDI Serial (500k wired) │
+  │                                                                         │
+  │  [USART2]  PA2 (TX2) / PA3 (RX2)  ───►  AX-12A Half-Duplex Bus (1 Mbaud)│
+  │                                                                         │
+  │  [USART3]  PB10 (TX3) / PB11 (RX3)───►  3DR Telemetry Radio (115.2k)    │
+  └─────────────────────────────────────────────────────────────────────────┘
+```
+
+### A. USART1 (`PA9` / `PA10`) — RC iBUS or Wired USB
+* **RC Mode (`RC_mcu_IK_wireless`):** Connect `PA10` (RX1) to the **iBUS Servo/Sensor port** on the **FlySky FS-iA10B receiver** @ **115,200 baud**.
+* **Wired Tuning Mode (`mcu_ik_engine_wired`):** Connect `PA9` (TX1) to FTDI RX and `PA10` (RX1) to FTDI TX @ **500,000 baud**.
+
+### B. USART2 (`PA2` / `PA3`) — AX-12+ Servo Bus (1 Mbaud)
+Dynamixel AX-12+ uses a half-duplex UART bus at **1,000,000 baud (1 Mbaud)**:
+* **PA2 (TX2) & PA3 (RX2):** USART2 communication pins.
+* **Resistor Circuit (10k Half-Duplex Hack):**
+  1. Connect a **10 kΩ resistor** between STM32 **PA2** and **PA3**.
+  2. Connect **PA3 (RX2)** directly to the **DATA line** of all AX-12+ servos.
+  3. Share common **GND** between STM32 and AX-12 power supply.
+
+### C. USART3 (`PB10` / `PB11`) — 3DR Wireless Telemetry Radio
+* **PB10 (TX3):** Connect to 3DR Telemetry Radio **RX** @ **115,200 baud**.
+* **PB11 (RX3):** Connect to 3DR Telemetry Radio **TX** @ **115,200 baud**.
+* Uses pipe (`|`) frame terminator and dynamic non-blocking buffer draining ($\text{avail}/5$, capped at 20 bytes/tick).
 
 ---
 
-## 3. AX-12+ Servos (USART2)
-Dynamixel AX-12+ uses a single-wire half-duplex UART communication. The STM32 communicates with the servos via `Serial2` at 1 Mbps.
-*   **PA2 (TX) & PA3 (RX):** These are the USART2 pins on the STM32.
-*   **Data Line Circuit (The "Half-Duplex Hack"):**
-    If you do not have a dedicated half-duplex buffer IC (like the 74LS241), you can use a simple resistor setup:
-    1. Connect a **10kΩ resistor** between STM32 **PA2 (TX)** and **PA3 (RX)**.
-    2. Connect **PA3 (RX)** directly to the **DATA pin** of the AX-12+ servos.
-    3. Ensure the STM32 and AX-12+ share a common **GND**.
-*   **Servo Power:** Connect VDD on the AX-12 to your 11.1V - 12V supply. Do not power the servos from the STM32!
+## 3. MPU6050 Accelerometer & Gyroscope (I2C1)
+
+The IMU communicates via the I2C1 hardware peripheral:
+* **PB6 (SCL):** Connect to MPU6050 **SCL** (400 kHz Fast-Mode).
+* **PB7 (SDA):** Connect to MPU6050 **SDA**.
+* Complementary filter calculation: $\text{pitch} = \alpha \cdot (\text{pitch} + \text{gyro}_y \cdot dt) + (1-\alpha) \cdot \text{accel}_{\text{pitch}}$.
 
 ---
 
-## 4. MPU Accelerometer & Gyroscope (I2C1)
-Since you are replacing the Nano with a direct I2C MPU module, use the primary I2C1 peripheral on the STM32:
-*   **PB6 (SCL):** Connect to MPU SCL pin
-*   **PB7 (SDA):** Connect to MPU SDA pin
-*   *(Note: Ensure pull-up resistors are present on the I2C lines. Most MPU breakout boards already include them).*
+## 4. DC Drive Motors & Encoders
+
+### Motor Speed & Direction Pins (L298N)
+* **Left Motor (Motor 1):** `PA1` (ENA PWM), `PB14` (IN1), `PB15` (IN2).
+* **Right Motor (Motor 2):** `PA0` (ENB PWM), `PB12` (IN3), `PB13` (IN4).
+
+### Quadrature Wheel Encoders
+* **Left Encoder:** `PA6` (Phase A - Ext Interrupt `countLeft()`), `PA7` (Phase B - Input Pullup).
+* **Right Encoder:** `PB0` (Phase A - Ext Interrupt `countRight()`), `PB1` (Phase B - Input Pullup).
+* Encoder velocity is smoothed using an Exponential Moving Average (EMA) low-pass filter ($\alpha = 0.15$).
 
 ---
 
-## 5. DC Motor Connections
-Based on the defined configurations in `main.cpp`:
+## 5. FlySky FS-iA10B RC Receiver Channel Allocation
 
-Note: Left/right motor channels are intentionally swapped to match your physical mounting.
-
-### Left DC Motor (Motor 1)
-*   **PA1:** Motor Speed / PWM (`ENA`)
-*   **PB14:** Motor Direction 1 (`IN1`)
-*   **PB15:** Motor Direction 2 (`IN2`)
-
-### Right DC Motor (Motor 2)
-*   **PA0:** Motor Speed / PWM (`ENB`)
-*   **PB12:** Motor Direction 1 (`IN3`)
-*   **PB13:** Motor Direction 2 (`IN4`)
+| Channel | Function | Input Range | Operational Action |
+| :---: | :--- | :---: | :--- |
+| **Ch 3** | Pitch / Speed Modifier | `1000 - 2000 µs` | Adjusts forward/backward pitch setpoint ($\pm 2.0^\circ$) |
+| **Ch 4** | Yaw / Steering Bias | `1000 - 2000 µs` | Adjusts differential motor speed for turning |
+| **Ch 5** | IMU Zero Calibrate | Switch (`> 1500`) | Rising-edge triggers zero-pitch IMU calibration |
+| **Ch 7** | Motor Hardware Arming | Switch (`> 1500`) | **Arming Switch:** High enables motors; Low disables motors |
+| **Ch 8** | Fine Pitch Trim | Knob (`1000 - 2000 µs`) | Live fine trim balance adjustment ($\pm 0.3^\circ$) |
+| **Ch 10**| Integral Windup Kill | Switch (`> 1500`) | Active-HIGH disables PID integral accumulation |
 
 ---
 
-## 6. Motor Encoders (Recommended Pins)
-To properly read encoder ticks, you need hardware timer pins capable of Encoder Mode. Since PA9/10 (Timer 1) are taken by Serial1, here are standard, non-conflicting Timer 2 and Timer 3 pins:
+## 📋 Master STM32 Pin Assignment Table
 
-### Left Motor Encoder (C1, C2)
-Suggest using **Timer 3** (Channels 1 & 2):
-*   **PA6:** Left Encoder Phase A (C1)
-*   **PA7:** Left Encoder Phase B (C2)
+| STM32 Pin | Function | Associated Component | Protocol / Specs |
+| :--- | :--- | :--- | :--- |
+| **PA0** | TIM2_CH1 PWM | Right Motor Speed (ENB) | PWM 0–255 Speed Control |
+| **PA1** | TIM2_CH2 PWM | Left Motor Speed (ENA) | PWM 0–255 Speed Control |
+| **PA2** | USART2 TX | AX-12 Servo Bus (TX) | 1,000,000 Baud (10k resistor to PA3) |
+| **PA3** | USART2 RX | AX-12 Servo Bus (Data) | 1,000,000 Baud Half-Duplex Data Line |
+| **PA6** | EXTI6 Interrupt | Left Encoder Phase A | RISING Edge Interrupt (`countLeft()`) |
+| **PA7** | GPIO Input | Left Encoder Phase B | Pullup Input |
+| **PA9** | USART1 TX | USB-FTDI RX / Debug Serial | 115,200 or 500,000 Baud |
+| **PA10** | USART1 RX | FlySky iBUS / USB-FTDI TX | 115,200 Baud iBUS Frame Input |
+| **PB0** | EXTI0 Interrupt | Right Encoder Phase A | RISING Edge Interrupt (`countRight()`) |
+| **PB1** | GPIO Input | Right Encoder Phase B | Pullup Input |
+| **PB6** | I2C1 SCL | MPU6050 SCL | I2C1 400 kHz Fast-Mode |
+| **PB7** | I2C1 SDA | MPU6050 SDA | I2C1 400 kHz Fast-Mode |
+| **PB10** | USART3 TX | 3DR Radio Module RX | 115,200 Baud Telemetry Output |
+| **PB11** | USART3 RX | 3DR Radio Module TX | 115,200 Baud Telemetry Input |
+| **PB12** | GPIO Output | Right Motor Direction 1 (IN3)| H-Bridge Direction Line |
+| **PB13** | GPIO Output | Right Motor Direction 2 (IN4)| H-Bridge Direction Line |
+| **PB14** | GPIO Output | Left Motor Direction 1 (IN1) | H-Bridge Direction Line |
+| **PB15** | GPIO Output | Left Motor Direction 2 (IN2) | H-Bridge Direction Line |
 
-### Right Motor Encoder (C1, C2)
-Suggest using **Timer 3** (Channels 3 & 4) or **Timer 4**:
-*   **PB0:** Right Encoder Phase A (C1)
-*   **PB1:** Right Encoder Phase B (C2)
-
----
-
-## Summary Pin Map
-
-| STM32 Pin | Function | Component |
-| :--- | :--- | :--- |
-| **PA0** | PWM Output | Right Motor (ENB) |
-| **PA1** | PWM Output | Left Motor (ENA) |
-| **PA2** | USART2 TX | AX-12+ (Buffer TX) |
-| **PA3** | USART2 RX | AX-12+ (Buffer RX) |
-| **PA6** | TIM3_CH1 | Left Encoder C1 |
-| **PA7** | TIM3_CH2 | Left Encoder C2 |
-| **PA9** | USART1 TX | USB-TTL RX (PC Comm) |
-| **PA10** | USART1 RX | USB-TTL TX (PC Comm) |
-| **PB0** | TIM3_CH3 | Right Encoder C1 |
-| **PB1** | TIM3_CH4 | Right Encoder C2 |
-| **PB6** | I2C1 SCL | MPU SCL |
-| **PB7** | I2C1 SDA | MPU SDA |
-| **PB12** | Digital Out | Right Motor (IN3) |
-| **PB13** | Digital Out | Right Motor (IN4) |
-| **PB14** | Digital Out | Left Motor (IN1) |
-| **PB15** | Digital Out | Left Motor (IN2) |

@@ -1,4 +1,4 @@
-﻿# Python Controller & Digital Twin
+# Python Controller & Digital Twin
 
 Welcome to the **Python Controller & Digital Twin** module of the Self-Balancing Bipedal Robot project. This directory is the central hub for all high-level control systems, complex mathematics, and graphical visualization tools necessary to orchestrate the robot's movements. 
 
@@ -14,35 +14,37 @@ The **Digital Twin** concept is a core pillar of this robotics project. By creat
 ## Essential Files & Sub-Directories
 
 ### 1) The Master Controller
-* **ipedal_digital_twin_controller.ipynb** (Previously known as x12_controller.ipynb)
-  * **Role**: This Jupyter Notebook is the grandmaster interface. When you are using the robot, this is the dashboard you look at. 
-  * **Features**: It connects to the COM port established with the robot. It parses the incoming packet stream containing IMU pitch data and motor outputs. It also contains the UI sliders/widgets to command the robot to "crouch", "stand tall", or "lean forward". Under the hood, it takes those UI inputs, runs the 3-DOF Inverse Kinematics for both legs, packages the target servo angles into a byte array, and transmits it down to the STM32.
+* **`bipedal_digital_twin_controller.ipynb`**
+  * **Role**: Primary Jupyter Notebook interface connecting Inverse Kinematics to the STM32 serial interface.
+  * **Features**: Connects to the COM port, parses incoming telemetry streams, and renders UI sliders to command leg coordinates ($X, Y, Z$) and body posture.
 
-### 2) digital_tests/
-* **Role**: Experimental playground involving the digital twin math.
-* **Contents**: Several iterations of digital twin.py and x12_protocol.py that were used purely to establish the initial 3D visualization using libraries like Matplotlib. These scripts were used to debug the math behind the leg joints without needing the physical robot turned on.
+### 2) `digital_tests/`
+* **Role**: Experimental playground for digital twin mathematics, 3D visualization, and raw `ax12_protocol.py` verification.
 
-### 3) oot_tests/
-* **Role**: The lowest-level PC communication scripts.
-* **Contents**: Scripts such as 	est_communication.py and 	est_serial.py. If the robot refuses to connect to the Digital Twin dashboard, you run these scripts to verify whether the COM port is active, whether baud rates match, and if the STM32 is successfully returning basic ping/pong handshakes.
+### 3) `root_tests/`
+* **Role**: Serial communication diagnostic scripts (`test_communication.py`, `test_serial.py`) used to verify baud rates and USB-TTL handshakes.
 
-### 4) 	uner_opus/
-* **Role**: The Automated PID Tuning Suite.
-* **Contents**: This folder contains 	une.py, utotune.py, and alance_tuner.ipynb. Manual PID tuning is extremely tedious. These scripts inject specialized "step-functions" into the robot, record the oscillation graph back from the IMU, and utilize analytical models to suggest optimal Kp, Ki, and Kd values for the balancing loop.
+### 4) `tuner_opus/`
+* **Role**: Legacy automated PID tuning routines (`tune.py`, `autotune.py`, `balance_tuner.ipynb`).
+
+---
+
+## 🖥️ Modern Graphical Tuning Interfaces
+
+> [!TIP]
+> **Active GUI Applications:** For the latest graphical tuning apps featuring real-time Matplotlib plots, live AX-12 servo health diagnostics (temperature/load), 3DR radio link support, and profile saving, use **[`Balance_Rework/tuner_legcontrol/`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol)**.
+
+---
 
 ## Setup & Dependencies
 
-To optimally run the scripts in this folder, you will need a Python 3.8+ environment (preferably managed via Conda or venv) with the following typical dependencies installed:
-* pyserial - Crucial for the 1Mbps UART telemetry stream.
-* 
-umpy, scipy - For heavy matrices handling and Ik computations.
-* matplotlib - Used for plotting the live PID tuning graphs and the 3D wireframe robot model.
-* jupyterlab or 
-otebook - To launch the main controller interface.
+To run the Python applications, set up a Python 3.8+ environment with the following dependencies:
+* `pyserial` — Serial UART communication
+* `numpy`, `scipy` — Inverse Kinematics & mathematical operations
+* `matplotlib` — Live plotting and 2D/3D visualization
+* `jupyterlab` or `notebook` — Notebook interface
 
-### Running the Digital Twin
-1. Ensure the Robot's STM32 is powered on and plugged via USB-TTL.
-2. Identify the active COM port (e.g. COM4 on Windows or /dev/ttyUSB0 on Linux).
-3. Open ipedal_digital_twin_controller.ipynb.
-4. Update the serial port cell to match your connected path.
-5. Execute the Notebook cells sequentially to initiate the handshake, launch the 3D twin, and begin commanding leg positions.
+### Running the Controller
+1. Connect the STM32 via USB-TTL or 3DR Telemetry Radio.
+2. Identify the active COM port (e.g. `COM3` on Windows or `/dev/ttyUSB0` on Linux).
+3. Open `bipedal_digital_twin_controller.ipynb` or launch a desktop GUI in `Balance_Rework/tuner_legcontrol/*/gui/main_gui.py`.

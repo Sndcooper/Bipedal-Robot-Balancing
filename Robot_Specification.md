@@ -12,16 +12,23 @@ Measurement priority used here:
 
 - Robot type: self-balancing bipedal robot with two wheel drive modules and two articulated legs.
 - Leg actuators: 4 x AX-12+ servos.
-- Wheel motors: 2 x JGA12V 300 rpm motors.
+- Wheel motors: 2 x JGA12V 300 rpm motors with Hall quadrature encoders.
+- Microcontroller: STM32F103C8T6 (Bluepill).
+- Orientation sensor: MPU6050 I2C IMU (400 kHz Fast-Mode).
+- Wireless Telemetry: 3DR 433MHz/915MHz Radio on `Serial3` (PB10 TX / PB11 RX @ 115,200 baud).
+- Remote Control: FlySky FS-iA10B RC Receiver on `Serial1` (PA10 RX @ 115,200 iBUS).
 - Power source: 1 x 3300 mAh 3S LiPo battery mounted below the servo box, low in the chassis.
 - Main structure: 3D-printed body shell/frame with the 4 servos inside the box and the legs attached outside.
 
-## 1.1 Mechanical Architecture
+## 1.1 Mechanical & Electrical Architecture
 
 - The wheel motors and the leg servos are separate subsystems.
 - The JGA12V motors drive the wheels and are responsible for the base motion and balance correction.
-- The AX-12+ servos drive the leg linkages inside the servo box.
+- The AX-12+ servos drive the leg linkages inside the servo box over a 1 Mbaud half-duplex UART bus (`Serial2` PA2 TX / PA3 RX).
+- The 3DR radio (`Serial3`) streams live telemetry and receives tuning commands using a non-blocking pipe (`|`) protocol.
+- The FlySky FS-iA10B receiver (`Serial1`) provides manual remote pitch control, steering, arming, IMU calibration, and integral kill switches.
 - The leg geometry used by the digital twin is a calibrated kinematic model of the real linkage layout.
+
 
 ## 2. Known Dimensions
 

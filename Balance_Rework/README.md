@@ -143,18 +143,31 @@ committing to a flash.
 
 ---
 
-## 4. Unified Tuner & Leg Control (`tuner_legcontrol/`)
+## 4. Unified Tuner & Leg Control Suite (`tuner_legcontrol/`)
 
-This folder contains the latest evolution of the project: integrating the balancing loop with the AX-12 leg inverse kinematics.
+This folder contains the latest evolution of the project: integrating the 100 Hz balancing control loop with AX-12 leg Inverse Kinematics (IK), FlySky FS-iA10B RC remote control, and 3DR wireless telemetry.
 
-### Key Firmware Features (`firmware/src/main.cpp`)
-- **Velocity EMA Low-Pass Filter**: A highly-optimized Exponential Moving Average filter (`velFilterAlpha = 0.15`) smooths the raw encoder velocity readings at 100Hz. This eliminates high-frequency quantization spikes ("Tk Tk Tk" chatter) when applying `Kd_vel` damping.
-- **Strict Anti-Windup**: The PID integral term is robustly locked to `0.0` whenever the motors are disabled (or during a safety cutoff). Furthermore, the applied `Ki` instantly drops to `0.0` when motors are off, preventing any latent wind-up jerks upon re-enabling.
-- **Non-Blocking Serial Protocol**: Supports high-frequency legacy PID tuning (`P`, `I`, `D`, `V`, etc.) alongside high-bandwidth multi-byte leg commands (`POS,id,val`, `TRQ,id,limit`, `CMP,id,margin,slope`) without choking the 100Hz balance loop.
-- **Half-Duplex Echo Discarding**: Features a precise 10k-resistor hack workaround for the AX-12 UART that mathematically predicts and clears exactly 8 bytes of physical loopback echo before reading servo health diagnostics.
+### Subfolder Ecosystem Matrix
 
-### Unified GUI (`gui/main_gui.py`)
-- **Tab 1: Balance Tuner**: Live PID and telemetry charts. Includes a **"Reset Integral"** button, and parameter sliders specifically scaled for aggressive tuning (e.g., `Ki` up to 1000).
-- **Tab 2: Kinematics & Health**: A 2D Matplotlib Digital Twin that solves bipedal Inverse Kinematics (IK) in real-time. When connected, dragging the foot `X/Y` sliders directly moves the physical AX-12 servos.
-- **Live Health Diagnostics**: Background thread seamlessly polls the AX-12 servos for Load and Temperature, flashing red if a leg actuator crosses the 65°C danger threshold.
-- **Profile Saving**: A **"Save Params"** button writes the complete current state of both the PID gains and leg IK geometry into a timestamped JSON file under `gui/profiles/`.
+| Folder | Kinematics Solver | Serial Link / Transport | Baud Rate | FlySky iBUS RC | Application Focus |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **[`RC_mcu_IK_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/RC_mcu_IK_wireless)** | **MCU (STM32)** | Wireless 3DR (`Serial3`) | 115,200 | **Enabled** (`PA10`) | **Untethered RC & Autonomous Balancing.** Full remote control, dynamic lean/gimbal, live wireless telemetry plotting. |
+| **[`mcu_ik_engine_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_wireless)** | **MCU (STM32)** | Wireless 3DR (`Serial3`) | 115,200 | Disabled | **Wireless Telemetry & Tuning.** Real-time GUI balance tuning over 3DR telemetry radio link. |
+| **[`mcu_ik_engine_wired`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_wired)** | **MCU (STM32)** | Wired USB (`Serial1`) | 500,000 | Disabled | **Low-Latency Bench Tuning.** Zero-drop high-bandwidth tuning connected directly to host PC. |
+| **[`mcu_ik_engine`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine)** | **MCU (STM32)** | Wired USB (`Serial1`) | 500,000 | Disabled | **Core MCU IK Reference Engine.** Baseline C++ spatial solver for $X,Y$ foot positions and lean. |
+| **[`mcu_ik_engine_pretest_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless)** | None (Benchmark) | Wireless 3DR (`Serial3`) | 115,200 | Disabled | **Radio Latency Diagnostic.** Benchmarking ping/pong latency and frame drops using `latency_test.py`. |
+| **[`pc_ik_engine`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/pc_ik_engine)** | **PC (Python)** | Wired USB (`Serial1`) | 115,200 | Disabled | **Kinematic Prototyping.** Python computes IK in `twin_kinematics.py` and streams `POS` commands. |
+
+### Key Hardware & Protocol Innovations
+
+1. **FlySky FS-iA10B iBUS RC Input (`RC_mcu_IK_wireless`):**
+   - **Ch 3:** Pitch setpoint modifier ($\pm 2.0^\circ$)
+   - **Ch 4:** Steering turn bias
+   - **Ch 5:** IMU zero-pitch calibration trigger
+   - **Ch 7:** Motor hardware arming switch (>1500 ON, <1500 OFF)
+   - **Ch 8:** Fine gimbal balance trim ($\pm 0.3^\circ$)
+   - **Ch 10:** Integral windup kill switch (active HIGH)
+2. **Default Tuned Gains:** Defaults updated to $K_p = 95.0$, $K_i = 670.0$, $K_d = 1.9$ across C++ firmware and Python GUI defaults.
+3. **Non-Blocking Telemetry Protocol:** Outbound lines use pipe (`|`) delimiter. Incoming bytes on `Serial3` are dynamically chunked ($\text{avail}/5$, capped at 20 bytes/tick) to strictly preserve the 100 Hz control loop budget.
+4. **Velocity EMA Filter & Anti-Windup:** Encoder velocity is filtered using an Exponential Moving Average ($\alpha = 0.15$), eliminating motor chatter while applying `Kd_vel`. PID integral is locked to zero whenever motors are disarmed.
+

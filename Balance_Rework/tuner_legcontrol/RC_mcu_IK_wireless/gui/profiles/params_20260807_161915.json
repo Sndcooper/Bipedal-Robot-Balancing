@@ -1,0 +1,20 @@
+{
+    "Kp": 95.0,
+    "Ki": 670.0,
+    "Kd": 2.0,
+    "alpha": 0.96,
+    "targetAngle": 0.0,
+    "maxSafeTilt": 25.0,
+    "Kp_vel": 0.02,
+    "Ki_vel": 0.001,
+    "Kp_pos": 0.5,
+    "fx1": 1.0,
+    "fy1": -151.0,
+    "fx2": -6.0,
+    "fy2": -150.0,
+    "dist": 180.0,
+    "lean": 0.0,
+    "trq_limit": 511.0,
+    "cmp_margin": 4.0,
+    "cmp_slope": 32.0
+}
