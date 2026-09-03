@@ -10,6 +10,7 @@
             "includePath": [
                 "C:/Users/vilas/Documents/PlatformIO/Projects/self balancing Bipedal robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless/firmware/include",
                 "C:/Users/vilas/Documents/PlatformIO/Projects/self balancing Bipedal robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless/firmware/src",
+                "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/Wire/src",
                 "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/cores/arduino/avr",
                 "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/cores/arduino/stm32",
                 "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/SrcWrapper/inc",
@@ -45,7 +46,6 @@
                 "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/SubGhz/src",
                 "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/src",
                 "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/VirtIO/src",
-                "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/Wire/src",
                 ""
             ],
             "browse": {
@@ -53,6 +53,7 @@
                 "path": [
                     "C:/Users/vilas/Documents/PlatformIO/Projects/self balancing Bipedal robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless/firmware/include",
                     "C:/Users/vilas/Documents/PlatformIO/Projects/self balancing Bipedal robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless/firmware/src",
+                    "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/Wire/src",
                     "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/cores/arduino/avr",
                     "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/cores/arduino/stm32",
                     "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/SrcWrapper/inc",
@@ -88,7 +89,6 @@
                     "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/SubGhz/src",
                     "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/USBDevice/src",
                     "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/VirtIO/src",
-                    "C:/Users/vilas/.platformio/packages/framework-arduinoststm32/libraries/Wire/src",
                     ""
                 ]
             },
@@ -97,6 +97,7 @@
                 "STM32F1",
                 "STM32F103xB",
                 "HAL_UART_MODULE_ENABLED",
+                "ENABLE_HWSERIAL2",
                 "ENABLE_HWSERIAL3",
                 "STM32F1xx",
                 "ARDUINO=10808",
