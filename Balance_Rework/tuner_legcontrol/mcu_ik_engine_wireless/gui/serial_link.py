@@ -23,8 +23,11 @@ class SerialLink:
         # Historical telemetry (Tab 1)
         self.history = {
             "t": [], "pitch": [], "pid_out": [],
-            "vel": [], "enc_l": [], "enc_r": [], "integral": []
+            "vel": [], "enc_l": [], "enc_r": [], "integral": [],
+            "tilt_bias": [],
         }
+        # Cascade state reported by firmware: 0=DRIVING 1=RAMPDOWN 2=HOLDING
+        self.cascade_state = 2
         self.start_time = time.time()
 
         # MCU state mirror
@@ -148,6 +151,11 @@ class SerialLink:
             self.history["enc_l"].append(data.get("EL", 0.0))
             self.history["enc_r"].append(data.get("ER", 0.0))
             self.history["integral"].append(data.get("INT", data.get("I", 0.0)))
+            self.history["tilt_bias"].append(data.get("TB", 0.0))
+
+            st = data.get("ST", None)
+            if st is not None:
+                self.cascade_state = int(st)
 
             # Sync motor/latch state from embedded flags
             mot = data.get("MOT", data.get("M", None))
@@ -173,10 +181,12 @@ class SerialLink:
             pass
 
     def _parse_fw_update(self, line):
-        """Parses: Updated -> P:11.2 I:0.0 D:0.0 Offset:0.0 Target:0.0 Alpha:0.96 STR:0.0 Tilt:25.0"""
+        """Parses: Updated -> P:11.2 I:0.0 D:0.0 Offset:0.0 Target:0.0 Alpha:0.96
+        VP:0.02 VI:0.001 VA:0.85 PP:0.5 Tilt:25.0"""
         KEY_MAP = {
             "P": "Kp", "I": "Ki", "D": "Kd",
-            "STR": "Kp_straight", "Offset": "pitchOffset",
+            "Offset": "pitchOffset",
+            "VP": "Kp_vel", "VI": "Ki_vel", "VA": "vel_alpha", "PP": "Kp_pos",
             "Target": "targetAngle", "Alpha": "alpha", "Tilt": "maxSafeTilt",
         }
         try:
@@ -221,11 +231,19 @@ class SerialLink:
     def set_kp(self, val):          self._send(f"P{val}")
     def set_ki(self, val):          self._send(f"I{val}")
     def set_kd(self, val):          self._send(f"D{val}")
-    def set_kp_straight(self, val): self._send(f"STR{val}")
+    def set_kp_vel(self, val):      self._send(f"VP{val}")
+    def set_ki_vel(self, val):      self._send(f"VI{val}")
+    def set_vel_alpha(self, val):   self._send(f"VA{val}")
+    def set_kp_pos(self, val):      self._send(f"PP{val}")
     def set_alpha(self, val):       self._send(f"A{val}")
     def set_target(self, val):      self._send(f"S{val}")
     def set_offset(self, val):      self._send(f"O{val}")
     def set_tilt(self, val):        self._send(f"T{val}")
+
+    # Drive / spin. Both are normalised to -1..+1 and sent at slider rate.
+    # spin < 0 = LEFT = clockwise seen from above.
+    def set_drive(self, val): self._send(f"FWD{val:.3f}")
+    def set_spin(self, val):  self._send(f"SPN{val:.3f}")
 
     def calibrate(self):      self._send("C")
     def toggle_motors(self):  self._send("M")

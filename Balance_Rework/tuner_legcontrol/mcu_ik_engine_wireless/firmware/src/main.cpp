@@ -38,15 +38,54 @@ extern HardwareSerial Serial3;
 const int MPU_ADDR = 0x68;
 float pitch = 0.0f, pitchOffset = 0.0f;
 float accelPitchRaw = 0.0f;
+float gyroRate = 0.0f;
 #define GYRO_PITCH_SIGN 1.0f
 
 // ── PID & TUNING ──────────────────────────────────────────────────────────────
+// ── LAYER 1: BALANCE PID (inner) ────────────────────────────────────────────
 float Kp = 80.0f, Ki = 0.0f, Kd = 0.0f;
-float targetAngle = 0.0f;
-float integral = 0.0f, prevError = 0.0f;
+float gui_base_angle = 0.0f;   // operator trim (the old "Target" slider)
+float integral = 0.0f;
 float alpha = 0.96f;
 float maxSafeTilt = 25.0f;
-float Kp_straight = 0.0f;
+
+// ── LAYER 2: VELOCITY → TILT PID (middle) ───────────────────────────────────
+// The robot cannot be commanded to a pitch directly: leaning is how it
+// accelerates. Drive commands therefore set a *velocity* target, and this loop
+// converts velocity error into the small tilt bias needed to achieve it.
+float Kp_vel = 0.02f;               // velocity error → tilt bias gain
+float Ki_vel = 0.001f;              // velocity integrator gain
+float integral_vel = 0.0f;
+float tilt_bias = 0.0f;             // output of velocity loop (degrees)
+const float MAX_TILT_BIAS = 5.0f;   // anti-windup hard clamp on tilt command
+
+// ── LAYER 3: POSITION HOLD (outer, P-only) ──────────────────────────────────
+float Kp_pos = 0.5f;                // position error → velocity command gain
+float target_enc_pos = 0.0f;        // encoder position to hold when idle
+const float MAX_VEL_CMD = 800.0f;   // max velocity target (counts/sec)
+
+// ── CASCADE STATE MACHINE ────────────────────────────────────────────────────
+// DRIVING  : drive command active — track velocity, keep updating hold point
+// RAMPDOWN : command released — hold vel=0 until robot stops, THEN latch pos
+// HOLDING  : stationary — P position loop cancels drift
+enum CascadeState { CS_DRIVING, CS_RAMPDOWN, CS_HOLDING };
+CascadeState cascadeState = CS_HOLDING;
+float target_velocity = 0.0f;
+float pos_error = 0.0f;
+float vel_error = 0.0f;
+
+float vel_current = 0.0f;   // EMA-filtered wheel velocity (counts/sec)
+float vel_alpha   = 0.85f;  // 0 = raw, →1 = frozen. 0.85 @100Hz ≈ 15Hz cutoff.
+                            // Kills integer-encoder quantisation noise that
+                            // would otherwise be amplified straight into tilt.
+
+// ── DRIVE / SPIN COMMANDS (from GUI sliders) ────────────────────────────────
+// drive_cmd: -1..+1  → forward/back velocity demand
+// spin_cmd : -1..+1  → differential PWM. Negative = LEFT = clockwise spin.
+float drive_cmd = 0.0f;
+float spin_cmd  = 0.0f;
+const float MAX_SPIN_PWM = 160.0f;  // PWM units of differential at full stick
+const float MAX_INTEGRAL_PWM = 120.0f;  // max PWM the Ki term may contribute
 
 bool motorsEnabled = false;
 bool safetyLatched = false;
@@ -296,7 +335,7 @@ void readIMU(float dt) {
 
   accelPitchRaw = atan2f((float)-ax, sqrtf((float)ay * ay + (float)az * az)) * 180.0f / PI;
   float accelPitch = accelPitchRaw - pitchOffset;
-  float gyroRate   = GYRO_PITCH_SIGN * (float)gy / 131.0f;
+  gyroRate = GYRO_PITCH_SIGN * (float)gy / 131.0f;
   pitch = alpha * (pitch + gyroRate * dt) + (1.0f - alpha) * accelPitch;
 }
 
@@ -331,7 +370,7 @@ void setMotors(int leftPWM, int rightPWM) {
 
 // ── COMMAND PARSER — zero heap, no String, no blocking ───────────────────────
 void parseCommand(char *cmd) {
-  char ack[96];
+  char ack[160];
 
   // ── IK commands ─────────────────────────────────────────────────────────
   if (cmd[0] == 'I' && cmd[1] == 'K') {
@@ -388,18 +427,47 @@ void parseCommand(char *cmd) {
     return; // no ack for high-freq leg commands
   }
 
-  // ── STR (straight gain) — must check before 'S' single char ─────────────
-  if (cmd[0] == 'S' && cmd[1] == 'T' && cmd[2] == 'R') {
-    Kp_straight = atof(cmd + 3);
+  // DRIVE / SPIN - high rate, no ack (checked before single-letter cmds)
+  // FWD<-1..1>  forward/back velocity demand
+  // SPN<-1..1>  spin demand; negative = LEFT = clockwise (viewed from above)
+  if (cmd[0] == 'F' && cmd[1] == 'W' && cmd[2] == 'D') {
+    drive_cmd = constrain((float)atof(cmd + 3), -1.0f, 1.0f);
+    return;
+  }
+  if (cmd[0] == 'S' && cmd[1] == 'P' && cmd[2] == 'N') {
+    spin_cmd = constrain((float)atof(cmd + 3), -1.0f, 1.0f);
+    return;
+  }
+
+  // Cascaded loop gains - prefix VP / VI / VA / PP
+  if (cmd[0] == 'V' && cmd[1] == 'P') {
+    Kp_vel = atof(cmd + 2);
+  }
+  else if (cmd[0] == 'V' && cmd[1] == 'I') {
+    Ki_vel = atof(cmd + 2);
+  }
+  else if (cmd[0] == 'V' && cmd[1] == 'A') {
+    vel_alpha = constrain((float)atof(cmd + 2), 0.0f, 0.99f);
+  }
+  else if (cmd[0] == 'P' && cmd[1] == 'P') {
+    Kp_pos = atof(cmd + 2);
     // fall through to ack below
   }
-  // ── PID & balance commands ───────────────────────────────────────────────
+  // PID & balance commands
   else if (cmd[0] == 'P' && cmd[1] != '\0') Kp = atof(cmd + 1);
   else if (cmd[0] == 'I' && cmd[1] != '\0') Ki = atof(cmd + 1);
   else if (cmd[0] == 'D' && cmd[1] != '\0') Kd = atof(cmd + 1);
   else if (cmd[0] == 'A' && cmd[1] != '\0') alpha = atof(cmd + 1);
   else if (cmd[0] == 'T' && cmd[1] != '\0') maxSafeTilt = atof(cmd + 1);
-  else if (cmd[0] == 'S' && cmd[1] != '\0') targetAngle = atof(cmd + 1);
+  else if (cmd[0] == 'O' && cmd[1] != '\0') {
+    // Manual pitch offset - the GUI already sent 'O<val>' but no handler
+    // existed, so "Set Offset" silently did nothing. Re-seed pitch against the
+    // new reference instead of letting the complementary filter crawl to it.
+    pitchOffset = atof(cmd + 1);
+    pitch       = accelPitchRaw - pitchOffset;
+    integral    = 0.0f;
+  }
+  else if (cmd[0] == 'S' && cmd[1] != '\0') gui_base_angle = atof(cmd + 1);
   else if (cmd[0] == 'S' && cmd[1] == '\0') {
     initAX12Legs();
     Serial3.println("ACK:SERVOS_RESET");
@@ -407,17 +475,27 @@ void parseCommand(char *cmd) {
   }
   else if (cmd[0] == 'C') { calibrateIMU(); return; }
   else if (cmd[0] == 'R') {
-    integral = 0.0f;
+    integral     = 0.0f;
+    integral_vel = 0.0f;
+    tilt_bias    = 0.0f;
     Serial3.println("ACK:INT_RESET");
     return;
   }
   else if (cmd[0] == 'M') {
     motorsEnabled = !motorsEnabled;
     if (motorsEnabled) {
-      safetyLatched  = false;
-      integral       = 0.0f;
+      safetyLatched   = false;
+      integral        = 0.0f;
+      integral_vel    = 0.0f;
+      tilt_bias       = 0.0f;
+      target_velocity = 0.0f;
+      vel_current     = 0.0f;
+      drive_cmd       = 0.0f;
+      spin_cmd        = 0.0f;
       encoderLeft    = 0; encoderRight    = 0;
       prevEncoderLeft= 0; prevEncoderRight= 0;
+      target_enc_pos  = 0.0f;   // hold the spot where we were armed
+      cascadeState    = CS_HOLDING;
     }
     snprintf(ack, sizeof(ack), "Motors %s", motorsEnabled ? "ENABLED" : "DISABLED");
     Serial3.println(ack);
@@ -427,8 +505,10 @@ void parseCommand(char *cmd) {
 
   // Ack for PID/tuning commands (parseable by _parse_fw_update in GUI)
   snprintf(ack, sizeof(ack),
-    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f STR:%.4f Tilt:%.2f",
-    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, Kp_straight, maxSafeTilt);
+    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f "
+    "VP:%.5f VI:%.5f VA:%.4f PP:%.4f Tilt:%.2f",
+    Kp, Ki, Kd, pitchOffset, gui_base_angle, alpha,
+    Kp_vel, Ki_vel, vel_alpha, Kp_pos, maxSafeTilt);
   uint8_t len = (uint8_t)strlen(ack);
   ack[len] = '\n'; len++;
   if (Serial3.availableForWrite() >= len)
@@ -502,37 +582,133 @@ void loop() {
     motorsEnabled = false;
     safetyLatched = true;
     integral      = 0.0f;
+    integral_vel  = 0.0f;
+    tilt_bias     = 0.0f;
+    drive_cmd     = 0.0f;
+    spin_cmd      = 0.0f;
+    cascadeState  = CS_HOLDING;
     setMotors(0, 0);
     Serial3.println("SAFETY:CUTOFF");
   }
 
-  // ── ENCODER SNAPSHOT ────────────────────────────────────────────────────
+  // ---- ENCODER -> VELOCITY ------------------------------------------------
   long encL = encoderLeft;
   long encR = encoderRight;
+
+  // The two encoders are mounted mirrored, so forward travel makes encL count
+  // up and encR count down. Normalising encR here is what makes "average =
+  // forward speed" and "difference = yaw" true. The old Kp_straight term used
+  // the raw (encL - encR), which grows with *forward* distance, not with
+  // heading error -- that is why it drove the robot in circles.
+  float deltaL = (float)(encL - prevEncoderLeft);
+  float deltaR = -(float)(encR - prevEncoderRight);
+  float vel_raw = ((deltaL + deltaR) * 0.5f) / dt;   // counts/sec, quantisation-noisy
+  vel_current = vel_alpha * vel_current + (1.0f - vel_alpha) * vel_raw;
+
   prevEncoderLeft  = encL;
   prevEncoderRight = encR;
 
-  // ── PID ─────────────────────────────────────────────────────────────────
-  float error = targetAngle - pitch;
+  float enc_pos_now = ((float)encL - (float)encR) * 0.5f;  // forward distance, counts
+
+  // ---- CONTROL ------------------------------------------------------------
+  float output = 0.0f;
 
   if (!motorsEnabled) {
-    integral      = 0.0f;
-    prevError     = error;
+    // Disarmed: park every integrator so re-arming starts from a clean state.
+    integral        = 0.0f;
+    integral_vel    = 0.0f;
+    tilt_bias       = 0.0f;
+    target_velocity = 0.0f;
+    vel_current     = 0.0f;
     encoderLeft   = 0; encoderRight   = 0;
-    prevEncoderLeft= 0; prevEncoderRight= 0;
+    prevEncoderLeft = 0; prevEncoderRight = 0;
+    target_enc_pos  = 0.0f;
+    cascadeState    = CS_HOLDING;
+    setMotors(0, 0);
   } else {
+    // -- LAYER 3 (OUTER): drive command / position hold -> velocity target --
+    bool driveActive = (fabsf(drive_cmd) > 0.05f);
+
+    switch (cascadeState) {
+      case CS_DRIVING:
+        if (!driveActive) {
+          // Command released: ramp to a stop before latching a hold point,
+          // otherwise we would latch a position the robot is still sliding past.
+          cascadeState    = CS_RAMPDOWN;
+          target_velocity = 0.0f;
+          integral_vel    = 0.0f;
+        } else {
+          target_velocity = drive_cmd * MAX_VEL_CMD;
+          target_enc_pos  = enc_pos_now;   // keep hold point under the robot
+        }
+        break;
+
+      case CS_RAMPDOWN:
+        target_velocity = 0.0f;
+        if (driveActive) {
+          cascadeState = CS_DRIVING;
+        } else if (fabsf(vel_current) < 20.0f) {
+          target_enc_pos = enc_pos_now;
+          integral_vel   = 0.0f;
+          cascadeState   = CS_HOLDING;
+        }
+        break;
+
+      case CS_HOLDING:
+        if (driveActive) {
+          integral_vel = 0.0f;
+          cascadeState = CS_DRIVING;
+        } else {
+          pos_error       = target_enc_pos - enc_pos_now;
+          target_velocity = constrain(Kp_pos * pos_error, -MAX_VEL_CMD, MAX_VEL_CMD);
+        }
+        break;
+    }
+
+    // -- LAYER 2 (MIDDLE): velocity error -> tilt bias ----------------------
+    vel_error = target_velocity - vel_current;
+    integral_vel += Ki_vel * vel_error * dt;
+    integral_vel  = constrain(integral_vel, -MAX_TILT_BIAS, MAX_TILT_BIAS);
+
+    tilt_bias = (Kp_vel * vel_error) + integral_vel;
+    tilt_bias = constrain(tilt_bias, -MAX_TILT_BIAS, MAX_TILT_BIAS);
+
+    // -- LAYER 1 (INNER): balance PID ---------------------------------------
+    // The setpoint is the operator trim plus the lean the velocity loop asked
+    // for. Commanding pitch directly (the old behaviour) fought the balance
+    // loop: the robot would try to *stand up at* the commanded lean instead of
+    // using that lean to accelerate, then run away.
+    float targetAngle = gui_base_angle + tilt_bias;
+    float error       = targetAngle - pitch;
+
+    // Anti-windup: clamp the integrator STATE, not just the output. Without
+    // this, holding the robot upright (or a stalled wheel) lets integral grow
+    // unbounded and the motors slam to full PWM the moment it is released.
     integral += error * dt;
+    if (Ki > 1e-6f) {
+      float intLimit = MAX_INTEGRAL_PWM / Ki;
+      integral = constrain(integral, -intLimit, intLimit);
+    } else {
+      integral = 0.0f;   // Ki disabled: never accumulate a latent kick
+    }
+
+    // Derivative on measurement, not on error. Differentiating the error makes
+    // any setpoint step (slider move, tilt_bias change) produce a huge one-tick
+    // spike; -gyroRate is the same signal for a fixed setpoint but is immune to
+    // setpoint jumps and is already a clean sensor reading.
+    float derivative = -gyroRate;
+
+    output = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+    // -- SPIN: pure differential, cancels out of the balance term ------------
+    // Negative spin_cmd = LEFT stick = clockwise seen from above.
+    float spin_pwm = spin_cmd * MAX_SPIN_PWM;
+
+    float left_pwm  = constrain(-output + spin_pwm, -255.0f, 255.0f);
+    float right_pwm = constrain(-output - spin_pwm, -255.0f, 255.0f);
+
+    setMotors((int)left_pwm, (int)right_pwm);
   }
-
-  float derivative = (error - prevError) / dt;
-  prevError = error;
-
-  float output = (Kp * error) + (Ki * integral) + (Kd * derivative);
-
-  float straightCorrection = constrain(Kp_straight * (float)(encL - encR), -50.0f, 50.0f);
-
-  if (motorsEnabled) setMotors(-output - straightCorrection, -output + straightCorrection);
-  else               setMotors(0, 0);
 
   // ── STRICT 50 Hz READ/WRITE TOGGLE ─────────────────────────────────────
   // READ cycle: servo health polling only (no AX-12 writes)
@@ -566,6 +742,9 @@ void loop() {
     Serial3.print(",I:");    Serial3.print(integral, 4);
     Serial3.print(",EL:");   Serial3.print(encL);
     Serial3.print(",ER:");   Serial3.print(encR);
+    Serial3.print(",V:");    Serial3.print(vel_current, 1);
+    Serial3.print(",TB:");   Serial3.print(tilt_bias, 2);
+    Serial3.print(",ST:");   Serial3.print((int)cascadeState);
     Serial3.print(",A:");    Serial3.print(alpha, 2);
     Serial3.print(",T:");    Serial3.print(maxSafeTilt, 1);
     Serial3.print(",M:");    Serial3.print(motorsEnabled);

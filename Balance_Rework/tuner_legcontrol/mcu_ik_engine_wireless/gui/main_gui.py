@@ -41,10 +41,19 @@ PARAM_SPECS = [
     ParamSpec("Kp",          "Kp",     0.0,   200.0,  0.1,   5.0,  0.01,   3, "gain",   78.0),
     ParamSpec("Ki",          "Ki",     0.0,  1000.0,  0.5,   1.0,  0.001,  4, "gain",    0.0),
     ParamSpec("Kd",          "Kd",     0.0,    50.0,  0.1,  10.0,  0.01,   3, "gain",    0.0),
-    ParamSpec("Kp_straight", "Kp STR", 0.0,     5.0, 0.05,   0.5,  0.01,   3, "gain",    0.0),
     ParamSpec("alpha",       "alpha",  0.80,  0.999, 0.001,  0.02, 0.0001, 4, "gain",   0.96),
     ParamSpec("targetAngle", "Target",-20.0,   20.0,  0.1,   5.0,  0.01,   3, "target",  0.0),
     ParamSpec("maxSafeTilt", "Tilt",   5.0,   50.0,   0.1,   5.0,  0.01,   2, "tilt",   25.0),
+]
+
+# Cascaded outer-loop gains. These replace the old Kp_straight term: the robot
+# now holds a straight line because the velocity/position loops null out drift,
+# not because of an encoder-difference hack.
+CASCADE_PARAM_SPECS = [
+    ParamSpec("Kp_vel",    "Kp vel",   0.0,   0.5,  0.001, 0.05, 0.0001, 5, "gain", 0.02),
+    ParamSpec("Ki_vel",    "Ki vel",   0.0,   0.1,  0.001, 0.01, 0.0001, 5, "gain", 0.001),
+    ParamSpec("vel_alpha", "vel filt", 0.0,  0.99,  0.01,  0.1,  0.001,  4, "gain", 0.85),
+    ParamSpec("Kp_pos",    "Kp pos",   0.0,   5.0,  0.01,  0.5,  0.001,  4, "gain", 0.5),
 ]
 
 IK_PARAM_SPECS = [
@@ -257,15 +266,132 @@ class BalanceTunerTab(ttk.Frame):
         controls.pack(fill=tk.X, pady=(0, 10))
 
         self.sliders = {}
-        for spec in PARAM_SPECS:
+        for spec in PARAM_SPECS + CASCADE_PARAM_SPECS:
             ctrl = CoarseFineSlider(controls, spec, spec.start_val, self._on_slider)
             ctrl.pack(fill=tk.X, pady=4, padx=5)
             self.sliders[spec.key] = ctrl
+
+        self._build_drive_pad(right)
 
         log_frame = ttk.LabelFrame(right, text="Serial Monitor")
         log_frame.pack(fill=tk.BOTH, expand=True)
         self.log_text = tk.Text(log_frame, height=10, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    # ------------------------------------------------------------------
+    # Drive pad: forward/back velocity + spin
+    # ------------------------------------------------------------------
+    def _build_drive_pad(self, parent):
+        """Forward/back and spin control.
+
+        Both sliders are spring-loaded: releasing the mouse snaps them back to
+        zero and sends a stop. A drive command that survived mouse-release would
+        leave the robot driving off with nobody holding the control.
+        """
+        pad = ttk.LabelFrame(parent, text="Drive Control")
+        pad.pack(fill=tk.X, pady=(0, 10))
+
+        self.drive_var = tk.DoubleVar(value=0.0)
+        self.spin_var  = tk.DoubleVar(value=0.0)
+        self._last_drive_sent = 0.0
+        self._last_spin_sent  = 0.0
+
+        # -- Forward / back --------------------------------------------------
+        row = ttk.Frame(pad); row.pack(fill=tk.X, padx=5, pady=(4, 0))
+        ttk.Label(row, text="Fwd / Back", font=("Helvetica", 9, "bold")).pack(side=tk.LEFT)
+        self.drive_label = ttk.Label(row, text="0.00")
+        self.drive_label.pack(side=tk.RIGHT)
+
+        self.drive_scale = tk.Scale(
+            pad, orient=tk.HORIZONTAL, showvalue=False,
+            from_=-1.0, to=1.0, resolution=0.01,
+            variable=self.drive_var, command=self._on_drive)
+        self.drive_scale.pack(fill=tk.X, padx=5)
+        self.drive_scale.bind("<ButtonRelease-1>", lambda e: self._release_drive())
+
+        # -- Spin ------------------------------------------------------------
+        row2 = ttk.Frame(pad); row2.pack(fill=tk.X, padx=5, pady=(6, 0))
+        ttk.Label(row2, text="Spin  (← CW / CCW →)",
+                  font=("Helvetica", 9, "bold")).pack(side=tk.LEFT)
+        self.spin_label = ttk.Label(row2, text="0.00")
+        self.spin_label.pack(side=tk.RIGHT)
+
+        self.spin_scale = tk.Scale(
+            pad, orient=tk.HORIZONTAL, showvalue=False,
+            from_=-1.0, to=1.0, resolution=0.01,
+            variable=self.spin_var, command=self._on_spin)
+        self.spin_scale.pack(fill=tk.X, padx=5)
+        self.spin_scale.bind("<ButtonRelease-1>", lambda e: self._release_spin())
+
+        self.drive_state_var = tk.StringVar(value="HOLDING")
+        ttk.Label(pad, textvariable=self.drive_state_var,
+                  font=("Consolas", 9)).pack(anchor="w", padx=5, pady=(4, 4))
+
+        ttk.Button(pad, text="STOP (zero drive & spin)",
+                   command=self.stop_drive).pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        # Keyboard: hold arrow keys to drive, release to stop.
+        top = self.winfo_toplevel()
+        top.bind("<KeyPress-Up>",    lambda e: self._key_drive( 0.5))
+        top.bind("<KeyPress-Down>",  lambda e: self._key_drive(-0.5))
+        top.bind("<KeyRelease-Up>",  lambda e: self._release_drive())
+        top.bind("<KeyRelease-Down>", lambda e: self._release_drive())
+        top.bind("<KeyPress-Left>",  lambda e: self._key_spin(-0.5))
+        top.bind("<KeyPress-Right>", lambda e: self._key_spin( 0.5))
+        top.bind("<KeyRelease-Left>",  lambda e: self._release_spin())
+        top.bind("<KeyRelease-Right>", lambda e: self._release_spin())
+
+    def _link(self):
+        lk = self.app.link
+        return lk if (lk and lk.ser) else None
+
+    def _on_drive(self, _raw=None):
+        v = round(float(self.drive_var.get()), 3)
+        self.drive_label.config(text=f"{v:+.2f}")
+        lk = self._link()
+        # Only send on real change — the Scale callback fires on every pixel.
+        if lk and abs(v - self._last_drive_sent) > 1e-6:
+            self._last_drive_sent = v
+            lk.set_drive(v)
+
+    def _on_spin(self, _raw=None):
+        v = round(float(self.spin_var.get()), 3)
+        self.spin_label.config(text=f"{v:+.2f}")
+        lk = self._link()
+        if lk and abs(v - self._last_spin_sent) > 1e-6:
+            self._last_spin_sent = v
+            lk.set_spin(v)
+
+    def _key_drive(self, v):
+        if abs(self.drive_var.get() - v) > 1e-6:
+            self.drive_var.set(v)
+            self._on_drive()
+
+    def _key_spin(self, v):
+        if abs(self.spin_var.get() - v) > 1e-6:
+            self.spin_var.set(v)
+            self._on_spin()
+
+    def _release_drive(self):
+        self.drive_var.set(0.0)
+        self._on_drive()
+
+    def _release_spin(self):
+        self.spin_var.set(0.0)
+        self._on_spin()
+
+    def stop_drive(self):
+        """Force both axes to zero, even if the link dropped mid-command."""
+        self.drive_var.set(0.0)
+        self.spin_var.set(0.0)
+        self.drive_label.config(text="+0.00")
+        self.spin_label.config(text="+0.00")
+        self._last_drive_sent = 0.0
+        self._last_spin_sent  = 0.0
+        lk = self._link()
+        if lk:
+            lk.set_drive(0.0)
+            lk.set_spin(0.0)
 
     def _on_slider(self, key, val):
         if not (self.app.link and self.app.link.ser):
@@ -274,16 +400,19 @@ class BalanceTunerTab(ttk.Frame):
         if   key == "Kp":          lk.set_kp(val)
         elif key == "Ki":          lk.set_ki(val)
         elif key == "Kd":          lk.set_kd(val)
-        elif key == "Kp_straight": lk.set_kp_straight(val)
         elif key == "alpha":       lk.set_alpha(val)
         elif key == "targetAngle": lk.set_target(val)
         elif key == "maxSafeTilt": lk.set_tilt(val)
+        elif key == "Kp_vel":      lk.set_kp_vel(val)
+        elif key == "Ki_vel":      lk.set_ki_vel(val)
+        elif key == "vel_alpha":   lk.set_vel_alpha(val)
+        elif key == "Kp_pos":      lk.set_kp_pos(val)
 
     def update_tab(self):
         if not self.app.link:
             return
 
-        for spec in PARAM_SPECS:
+        for spec in PARAM_SPECS + CASCADE_PARAM_SPECS:
             val = self.app.link.fw.get(spec.key)
             if val is not None and spec.key in self.sliders:
                 self.sliders[spec.key].sync_from_external(float(val))
@@ -295,10 +424,17 @@ class BalanceTunerTab(ttk.Frame):
             pitch   = snap["pitch"][-n:]
             pid_out = snap["pid_out"][-n:]
             vel     = snap["vel"][-n:]
-            target  = self.app.link.fw.get("targetAngle", 0.0)
+            tb      = snap.get("tilt_bias", [])[-n:]
+            base    = float(self.app.link.fw.get("targetAngle", 0.0) or 0.0)
+
+            # Effective setpoint = operator trim + velocity-loop tilt bias.
+            if len(tb) == n:
+                target_series = [base + b for b in tb]
+            else:
+                target_series = [base] * n
 
             self.pitch_line.set_data(x, pitch)
-            self.target_line.set_data(x, [float(target)] * n)
+            self.target_line.set_data(x, target_series)
             self.pid_line.set_data(x, pid_out)
             self.vel_line.set_data(x, vel)
 
@@ -306,6 +442,11 @@ class BalanceTunerTab(ttk.Frame):
             self.ax.set_ylim(-15, 15)
             self.ax2.set_ylim(-200, 200)
             self.canvas.draw_idle()
+
+        st = getattr(self.app.link, "cascade_state", 2)
+        st_name = {0: "DRIVING", 1: "RAMPDOWN", 2: "HOLDING"}.get(st, "?")
+        vel = snap["vel"][-1] if snap.get("vel") else 0.0
+        self.drive_state_var.set(f"{st_name}   vel={vel:+7.1f} c/s")
 
         lines = self.app.link.recent_lines(50)
         self.log_text.config(state=tk.NORMAL)
@@ -534,6 +675,7 @@ class BipedTunerApp(tk.Tk):
         self.title("Unified Biped Tuner & Digital Twin")
         self.geometry("1200x850")
         self.link = None
+        self._cutoff_seen = False
 
         self.port_var         = tk.StringVar(value="COM3")
         self.status_var       = tk.StringVar(value="Disconnected")
@@ -600,13 +742,20 @@ class BipedTunerApp(tk.Tk):
 
     def disconnect(self):
         if self.link:
+            try:
+                self.tab_tuner.stop_drive()
+            except Exception:
+                pass
             self.link.close()
             self.link = None
         self.status_var.set("Disconnected")
         self.pitch_var.set("Angle: --°")
 
     def toggle_motors(self):
-        if self.link: self.link.toggle_motors()
+        if self.link:
+            # Zero the drive axes first so a toggle never re-arms into motion.
+            self.tab_tuner.stop_drive()
+            self.link.toggle_motors()
 
     def safety_reset(self):
         if self.link: self.link.arm_cutoff_watch()
@@ -648,7 +797,13 @@ class BipedTunerApp(tk.Tk):
     def _poll(self):
         if self.link:
             self.motor_var.set(f"Motors: {'ON' if self.link.motors_on else 'OFF'}")
-            self.cutoff_var.set("Safety: LATCHED!" if self.link.cutoff_since() else "Safety: clear")
+            latched = self.link.cutoff_since()
+            self.cutoff_var.set("Safety: LATCHED!" if latched else "Safety: clear")
+            # Firmware zeroes drive_cmd/spin_cmd on cutoff; mirror that in the UI
+            # so the sliders cannot re-apply a stale command on re-arm.
+            if latched and not self._cutoff_seen:
+                self.tab_tuner.stop_drive()
+            self._cutoff_seen = latched
 
             snap = self.link.snapshot()
             if snap and snap.get("pitch"):
