@@ -68,7 +68,7 @@ float gyroRate = 0.0f;
 // ── PID & TUNING
 // ──────────────────────────────────────────────────────────────
 // ── LAYER 1: BALANCE PID (inner) ────────────────────────────────────────────
-float Kp = 80.0f, Ki = 0.0f, Kd = 0.0f;
+float Kp = 95.0f, Ki = 670.0f, Kd = 1.9f;  // canonical tuned gains (match GUI + docs)
 float gui_base_angle = 0.0f;
 float integral = 0.0f;
 float alpha = 0.96f;
@@ -545,6 +545,13 @@ void parseCommand(char *cmd) {
     alpha = atof(cmd + 1);
   else if (cmd[0] == 'T' && cmd[1] != '\0')
     maxSafeTilt = atof(cmd + 1);
+  else if (cmd[0] == 'O' && cmd[1] != '\0') {
+    // Manual pitch offset. Re-seed pitch against the new reference rather than
+    // letting the complementary filter crawl to it. (GUI "Set Offset" sends O<val>.)
+    pitchOffset = atof(cmd + 1);
+    pitch       = accelPitchRaw - pitchOffset;
+    integral    = 0.0f;
+  }
   else if (cmd[0] == 'S' && cmd[1] != '\0')
     gui_base_angle = atof(cmd + 1);
   else if (cmd[0] == 'S' && cmd[1] == '\0') {

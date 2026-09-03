@@ -54,7 +54,7 @@ float gyroRate = 0.0f;
 
 // ── PID & TUNING ─────────────────────────────────────────────────────────────
 // ── LAYER 1: BALANCE PID (inner) ────────────────────────────────────────────
-float Kp = 80.0f, Ki = 0.0f, Kd = 0.0f;
+float Kp = 95.0f, Ki = 670.0f, Kd = 1.9f;  // canonical tuned gains (match GUI + docs)
 float gui_base_angle = 0.0f;
 float integral = 0.0f;
 float alpha = 0.96f;
