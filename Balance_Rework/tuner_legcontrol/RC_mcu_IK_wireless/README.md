@@ -66,13 +66,18 @@ Wireless RC control commands are read in real-time by `readRC()` via `IBusBM`:
 
 * **Frame Terminator:** Pipe (`|`) symbol.
 * **Non-Blocking Dynamic Drain:** `Serial3` RX buffer reads up to $\operatorname{clamp}(\text{avail}/5, 1, 20)$ bytes per 100 Hz loop tick.
-* **Telemetry Output Frame:**
+* **Telemetry Style:** space-separated `key<value>` tokens, pipe-terminated (this
+  variant does **not** use the colon/comma `PITCH:` style — that belongs to the
+  older `Balance_Rework/firmware`).
+* **Telemetry Output Frame** (fields: seq, loop µs, pitch, PID out, integral,
+  velocity, tilt bias, pos err, vel err, vel-EMA alpha, cascade state, alpha,
+  max tilt, motors, latched):
   ```text
-  PITCH:0.12|ACC:-0.05|ENC:120,-118|V:0.45|MOT:1|SRV:6,42,15.2|
+  S123 DT10012 P0.12 O-4.50 I0.0100 V0.4 TB0.030 EP0.0 EV0.0 VR0.850 ST2 A0.96 T25.0 M1 L0|
   ```
 * **Command Acknowledgement:**
   ```text
-  Updated P95.000 I670.000 D1.900 Offset0.0000 Target0.000 Alpha0.9600 STR0.0000 Tilt25.00|
+  Updated P95.000 I670.000 D1.900 Offset0.0000 Target0.000 Alpha0.9600 VP0.02000 VI0.00100 VA0.8500 PP0.5000 Tilt25.00|
   ```
 
 ---

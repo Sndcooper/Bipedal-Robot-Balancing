@@ -94,6 +94,6 @@ uint16_t presPosition  = buf[5 + 36] | (buf[5 + 37] << 8); // buf[41], buf[42]
 uint16_t presSpeed     = buf[5 + 38] | (buf[5 + 39] << 8); // buf[43], buf[44]
 uint16_t presLoad      = buf[5 + 40] | (buf[5 + 41] << 8); // buf[45], buf[46]
 float    presVoltage   = buf[5 + 42] * 0.1f;               // buf[47]
-uint8_t  presTemp      = buf[5 + 48 - 5 + 5];              // buf[48] (Addr 43)
+uint8_t  presTemp      = buf[5 + 43];                      // buf[48] (Addr 43)
 uint8_t  isMoving      = buf[5 + 46];                      // buf[51]
 ```

@@ -37,13 +37,101 @@ This module provides an **Untethered MCU-Based Inverse Kinematics Architecture**
 
 ## 📡 Wireless Protocol & Dynamic Drain
 
-* **Terminator:** Pipe (`|`) character.
-* **Buffer Drain Protection:** RX bytes are read dynamically every 100 Hz loop tick:
-  $$\text{Chunk Size} = \operatorname{clamp}\left(\frac{\text{Serial3.available()}}{5},\, 1,\, 20\right)$$
-* **Outbound Telemetry Frame:**
+* **Terminator:** newline (`\n`, via `Serial3.println`). Commands are also
+  newline-terminated. (This variant uses `key:value` comma style — **not** the
+  space/pipe style of the `RC_mcu_IK_wireless` flagship.)
+* **Buffer Drain Protection:** RX is drained non-blocking with a 40 µs hard budget
+  per 100 Hz loop tick so a burst of commands can never blow the loop timing.
+* **Outbound Telemetry Frame** (fields: seq, loop µs, pitch, PID out, integral,
+  raw encoders L/R, velocity, tilt bias, cascade state, alpha, max tilt, motors,
+  latched):
   ```text
-  PITCH:1.05|ACC:-0.12|ENC:85,-90|V:0.32|MOT:1|
+  S:42,DT:10008,P:1.05,PO:-3.20,I:0.0100,EL:85,ER:-90,V:0.32,TB:0.02,ST:2,A:0.96,T:25.0,M:1,L:0
   ```
+
+---
+
+## 🎮 Drive Control & Cascaded Balance
+
+`Kp_straight` has been **removed**. It fed on `(encL - encR)`, but the encoders
+are mirror-mounted, so that difference tracks *forward distance*, not heading
+error -- the correction grew the further the robot drove and steered it into a
+circle. Straight-line travel now comes from the cascaded loops below, and
+turning is an explicit operator command.
+
+### Three-layer control stack
+
+| Layer | Loop | Input | Output | Gains |
+| :--- | :--- | :--- | :--- | :--- |
+| 3 (outer) | Position hold | encoder position error | velocity target | `Kp_pos` (`PP`) |
+| 2 (middle) | Velocity | velocity error | **tilt bias** (deg) | `Kp_vel` (`VP`), `Ki_vel` (`VI`) |
+| 1 (inner) | Balance PID | pitch error | motor PWM | `Kp`, `Ki`, `Kd` |
+
+A balancing robot cannot be commanded to a pitch directly -- leaning *is* how it
+accelerates. Drive commands therefore set a **velocity** target, and layer 2
+converts velocity error into the small lean required. The previous firmware fed
+the operator setpoint straight into the balance loop, so the robot tried to
+*stand up at* the commanded angle instead of using it to move, then ran away.
+
+`Kd` now differentiates the **measurement** (`-gyroRate`) rather than the error,
+so moving a slider no longer injects a one-tick derivative spike.
+
+### Cascade state machine
+
+```
+        drive cmd                  |cmd| < 0.05
+HOLDING ──────────► DRIVING ──────────────────► RAMPDOWN
+   ▲                   ▲                            │
+   │                   └──────── drive cmd ─────────┘
+   └───────────────── |vel| < 20 counts/s ──────────┘
+```
+
+`RAMPDOWN` exists so the hold point is latched only once the robot has actually
+stopped; latching on release would pin it to a spot it is still sliding past.
+
+### Spin
+
+Spin is a pure differential added after the balance term, so it cancels out of
+the common-mode balance command and cannot tip the robot:
+
+```
+left  = -output + spin_pwm
+right = -output - spin_pwm
+```
+
+* **Negative** `SPN` = left = **clockwise** (viewed from above)
+* **Positive** `SPN` = right = **anticlockwise**
+* Magnitude scales speed, up to `MAX_SPIN_PWM` (160 PWM units)
+
+### GUI drive pad (Balance Tuner tab)
+
+Both axes are **spring-loaded** -- releasing the mouse or key snaps them to zero
+and sends a stop, so a command never outlives the operator's grip. Arrow keys
+drive (Up/Down) and spin (Left/Right); a **STOP** button zeroes both. The pad is
+also force-zeroed on safety cutoff, motor toggle, and disconnect.
+
+---
+
+## 📡 Command Reference
+
+Commands are newline-terminated ASCII. Longer prefixes are matched **before**
+single-letter commands, so `SPN`/`PP`/`VP` never collide with `S`/`P`.
+
+| Command | Meaning |
+| :--- | :--- |
+| `FWD<-1..1>` | Forward/back velocity demand (no ack, high rate) |
+| `SPN<-1..1>` | Spin demand; negative = clockwise (no ack, high rate) |
+| `VP<f>` / `VI<f>` | Velocity loop `Kp_vel` / `Ki_vel` |
+| `VA<f>` | Velocity EMA filter coefficient (0..0.99) |
+| `PP<f>` | Position hold `Kp_pos` |
+| `P` `I` `D` `<f>` | Balance PID gains |
+| `A<f>` / `T<f>` | Complementary `alpha` / max safe tilt |
+| `S<f>` | Operator pitch trim (base angle) |
+| `O<f>` | Manual pitch offset **(newly implemented)** |
+| `S` / `C` / `R` / `M` | Servo reset / calibrate / reset integrals / toggle motors |
+
+Telemetry adds `V:` (filtered velocity), `TB:` (tilt bias) and `ST:` (cascade
+state: 0=DRIVING 1=RAMPDOWN 2=HOLDING).
 
 ---
 

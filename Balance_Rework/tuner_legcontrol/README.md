@@ -12,8 +12,15 @@ This directory contains the complete modular suite of firmware and graphical tun
 | **[`mcu_ik_engine_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_wireless)** | **MCU (STM32)** | Wireless (3DR) | 115,200 | Disabled | **Wireless Telemetry & GUI Tuning.** Untethered balance tuning with real-time GUI telemetry plotting over 3DR radio. |
 | **[`mcu_ik_engine_wired`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_wired)** | **MCU (STM32)** | Wired (USB/FTDI) | 500,000 | Disabled | **Low-Latency Wired Balance Tuning.** Zero-drop high-bandwidth tuning directly connected to Python GUI. |
 | **[`mcu_ik_engine`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine)** | **MCU (STM32)** | Wired (Serial1) | 500,000 | Disabled | **Core MCU IK Reference Engine.** Baseline on-chip IK foot coordinate ($X,Y$), leg distance, and lean solver. |
-| **[`mcu_ik_engine_pretest_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless)** | None (Diagnostic) | Wireless (3DR) | 115,200 | Disabled | **Radio Latency & Diagnostic Benchmarking.** Minimal benchmark firmware to test throughput, ping/pong latency, and packet loss. |
+| **[`mcu_ik_engine_pretest_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_ik_engine_pretest_wireless)** | None (single PID) | Wireless (3DR) | 115,200 | Disabled | **Minimal single-loop balancer.** One balance PID + IMU calibration, no cascade/IK/RC; single-screen GUI. Retains PING/PONG latency probe for `latency_test.py`. |
 | **[`pc_ik_engine`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/pc_ik_engine)** | **PC (Python)** | Wired (Serial1) | 115,200 | Disabled | **Kinematic GUI Prototyping.** PC calculates inverse kinematics in Python (`twin_kinematics.py`) and streams raw angle target writes to MCU. |
+| **[`mcu_pos_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/Balance_Rework/tuner_legcontrol/mcu_pos_wireless)** | **MCU (STM32)** | Wireless (3DR) | 115,200 | Disabled | **Position / Encoder-Target Tuner.** Dedicated single-position balancing and encoder hold-position tuning over 3DR radio. |
+
+> **Protocol note:** these variants are self-contained pairs and their serial
+> protocols have **diverged**. `RC_mcu_IK_wireless` uses space-separated,
+> pipe-terminated frames (`S123 P0.12 ...|`); the other wireless variants use
+> `key:value`, comma-separated, newline-terminated frames (`S:123,P:0.12,...`).
+> When editing, always match a firmware to *its own* `gui/serial_link.py`.
 
 ---
 
@@ -84,14 +91,17 @@ In `RC_mcu_IK_wireless`, manual wireless control is handled via an iBUS connecti
 
 To maintain a strict **100 Hz real-time loop budget (10,000 µs)** without UART blocking:
 
-1. **Pipe Terminator (`|`) Protocol:** Outgoing and incoming commands use `|` as the canonical delimiter (e.g. `PITCH:1.23|ACC:-0.45|ENC:120,-115|V:0.4|MOT:1|`). Standard `\n` is also accepted for backward compatibility with serial terminals.
-2. **Non-Blocking Dynamic Drain:** RX buffers on `Serial3` are read dynamically every loop tick:
-   $$\text{Chunk Size} = \operatorname{clamp}\left(\frac{\text{Serial3.available()}}{5},\, 1,\, 20\right) \text{ bytes/tick}$$
-   This protects against buffer overruns during high data rate spikes without blocking CPU execution.
-3. **Telemetry Packet Format:**
-   ```
-   PITCH:<val>|ACC:<val>|ENC:<l>,<r>|V:<vel>|SRV:<id>,<temp>,<load%>|
-   ```
+1. **Terminator (varies by variant):** `RC_mcu_IK_wireless` uses the pipe (`|`)
+   as the canonical delimiter; the other wireless variants terminate with `\n`.
+   Both accept `\n` for serial-terminal compatibility.
+2. **Non-Blocking Drain:** RX on `Serial3` is drained every loop tick with a
+   budget cap so it can never blow the 100 Hz timing — either a dynamic
+   $\operatorname{clamp}(\text{avail}/5, 1, 20)$ bytes/tick (RC variant) or a
+   40 µs hard time budget (other wireless variants).
+3. **Telemetry Packet Format (current firmware):** compact `key`+`value` token
+   stream, e.g. flagship `S123 DT10008 P0.12 O-4.5 I0.01 V0.4 TB0.03 ST2 A0.96 T25 M1 L0|`
+   or wireless-engine `S:123,DT:10008,P:0.12,PO:-4.5,I:0.01,EL:85,ER:-90,V:0.4,TB:0.03,ST:2,A:0.96,T:25,M:1,L:0`.
+   (The older `PITCH:|ACC:|ENC:|SRV:` frame belongs to `Balance_Rework/firmware`, not these variants.)
 
 ---
 
