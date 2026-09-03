@@ -12,7 +12,7 @@ except ImportError:
 
 
 class SerialLink:
-    def __init__(self, port="COM3", baud=115200):
+    def __init__(self, port="COM13", baud=115200):
         self.port     = port
         self.baud     = baud
         self.ser      = None
@@ -196,7 +196,7 @@ class SerialLink:
             "P": "Kp", "I": "Ki", "D": "Kd",
             "Offset": "pitchOffset",
             "Target": "targetAngle", "Alpha": "alpha", "Tilt": "maxSafeTilt",
-            "TrimGain": "Ki_trim",
+            "TrimGain": "Ki_trim", "Crouch": "crouchOffset",
         }
         try:
             _, payload = line.split("->", 1)
@@ -249,6 +249,15 @@ class SerialLink:
     def set_trim_gain(self, val):      self._send(f"TG{val}")
     def set_auto_trim(self, enabled):  self._send(f"TE{1 if enabled else 0}")
     def commit_trim(self):             self._send("TC")
+
+    # Crouch bar — stands the legs tall or crouches them, independent of
+    # motorsEnabled (works with the wheel motors disarmed on the bench).
+    def set_crouch(self, val):         self._send(f"CR{val}")
+
+    # Raw per-servo position — bypasses the crouch IK entirely, moves exactly
+    # one AX-12 joint. servo_id in {6, 0, 14, 1}; pos is a raw AX-12 unit (0-1023).
+    def set_servo_position(self, servo_id, pos):
+        self._send(f"PS{int(servo_id)} {int(pos)}")
 
     def calibrate(self):      self._send("C")
     def toggle_motors(self):  self._send("M")

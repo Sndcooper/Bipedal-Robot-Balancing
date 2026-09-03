@@ -55,7 +55,7 @@ float integral = 0.0f;
 float alpha = 0.96f;                        // complementary-filter coefficient
 float targetAngle = 0.0f;                   // balance setpoint (operator trim)
 float maxSafeTilt = 25.0f;                  // safety cutoff threshold (deg)
-const float MAX_INTEGRAL_PWM = 120.0f;      // anti-windup: cap Ki term's PWM
+const float MAX_INTEGRAL_PWM = 1200.0f;     // anti-windup: cap Ki term's PWM (10x, per request)
 
 // ── ENCODER VELOCITY (telemetry display; also feeds auto-trim below) ────────
 float vel_current = 0.0f;
@@ -71,7 +71,8 @@ float vel_alpha   = 0.85f;
 bool  autoTrimEnabled = false;          // off by default — opt in with TE1
 float Ki_trim         = 0.001f;         // deg of bias per (count/s) per second — TG cmd
 float trim_bias       = 0.0f;           // current auto-trim contribution (deg)
-const float MAX_TRIM_BIAS = 5.0f;       // anti-windup clamp (deg), matches sibling variant
+const float MAX_TRIM_BIAS = 15.0f;      // anti-windup clamp (deg) — widened 3x, capped
+                                         // well under maxSafeTilt (25°) on purpose: see note below.
 
 bool motorsEnabled = false;
 bool safetyLatched = false;
@@ -114,6 +115,94 @@ ServoState legServos[4] = {
   {14, 441, 511, 4, 32, 0, 0.0f},   // Leg1 Right (441 = straight-down right)
   {1,  441, 511, 4, 32, 0, 0.0f},   // Leg2 Right
 };
+
+// ── CROUCH IK (opt-in, one degree of freedom: stand tall <-> crouch) ────────
+// Ports the 5-bar solve_ik/map_angle_to_ax12 pair from mcu_ik_engine_wireless
+// verbatim (same mounts, same 818/441 calibration) so the math is proven, not
+// re-derived. No lean/turn here on purpose — this variant only needs a single
+// "how low is the body over the wheels" knob, driven by the CR<f> command.
+#define SERVO_L_X -30.0f
+#define SERVO_L_Y   0.0f
+#define SERVO_R_X  30.0f
+#define SERVO_R_Y   0.0f
+#define FEMUR_LEN  55.0f
+#define TIBIA_LEN 100.0f
+#define LEG2_INVERTED_MOUNT true
+
+const float ik_fx1 = 1.0f,  ik_fy1 = -151.1f;   // Leg1 standing foot target (mm)
+const float ik_fx2 = -6.0f, ik_fy2 = -149.6f;   // Leg2 standing foot target (mm)
+const float ik_dist = 180.0f;                    // leg separation (mm)
+float crouchOffset = 0.0f;   // CR command: 0 = standing (default), + = crouched (mm)
+
+struct Point2D { float x; float y; };
+
+bool circle_intersections(Point2D p0, float r0, Point2D p1, float r1,
+                           Point2D &out1, Point2D &out2) {
+  float dx = p1.x - p0.x, dy = p1.y - p0.y;
+  float d  = sqrtf(dx * dx + dy * dy);
+  if (d > r0 + r1 || d < fabsf(r0 - r1) || d == 0) return false;
+  float a  = (r0 * r0 - r1 * r1 + d * d) / (2.0f * d);
+  float h  = sqrtf(fmaxf(r0 * r0 - a * a, 0.0f));
+  float px = p0.x + a * dx / d;
+  float py = p0.y + a * dy / d;
+  float rx = -h * dy / d, ry = h * dx / d;
+  out1 = {px + rx, py + ry};
+  out2 = {px - rx, py - ry};
+  return true;
+}
+
+struct IK_Result { bool valid; Point2D Knee_L, Knee_R; float Angle_L, Angle_R; };
+
+IK_Result solve_ik(float tx, float ty, float leg_offset_x) {
+  IK_Result res = {false};
+  Point2D foot = {tx, ty};
+  Point2D sl   = {SERVO_L_X + leg_offset_x, SERVO_L_Y};
+  Point2D sr   = {SERVO_R_X + leg_offset_x, SERVO_R_Y};
+  Point2D li1, li2, ri1, ri2;
+  if (!circle_intersections(sl, FEMUR_LEN, foot, TIBIA_LEN, li1, li2)) return res;
+  if (!circle_intersections(sr, FEMUR_LEN, foot, TIBIA_LEN, ri1, ri2)) return res;
+  res.valid  = true;
+  res.Knee_L = (li1.x < li2.x) ? li1 : li2;
+  res.Knee_R = (ri1.x > ri2.x) ? ri1 : ri2;
+  res.Angle_L = atan2f(res.Knee_L.y - sl.y, res.Knee_L.x - sl.x) * 180.0f / PI;
+  res.Angle_R = atan2f(res.Knee_R.y - sr.y, res.Knee_R.x - sr.x) * 180.0f / PI;
+  return res;
+}
+
+uint16_t map_angle_to_ax12(float ik_angle, bool is_left, bool is_leg2) {
+  float base_angle = is_leg2 ? 90.0f : -90.0f;
+  float diff_deg   = fmodf(ik_angle - base_angle + 180.0f, 360.0f);
+  if (diff_deg < 0) diff_deg += 360.0f;
+  diff_deg -= 180.0f;
+  float base_pos = is_left ? 818.0f : 441.0f;
+  float ax_pos   = base_pos + (diff_deg * 3.413f);
+  return (uint16_t)constrain((int)ax_pos, 0, 1023);
+}
+
+// Recomputes goalPos for all 4 legs at the current crouchOffset and caches it
+// into legServos[]; pollLegServosTask() (20ms/servo) re-asserts it to hardware
+// on its normal cadence — no need to touch the 100 Hz hot path for this.
+void updateLegPose() {
+  float footY1 = ik_fy1 + crouchOffset;
+  float footY2 = ik_fy2 + crouchOffset;
+  IK_Result sol1 = solve_ik(ik_fx1, footY1, 0.0f);
+  IK_Result sol2 = solve_ik(ik_fx2 + ik_dist, footY2, ik_dist);
+  if (!sol1.valid || !sol2.valid) return;   // out of reach — leave last good pose
+
+  uint16_t p6  = map_angle_to_ax12(sol1.Angle_L, true,  false);
+  uint16_t p14 = map_angle_to_ax12(sol1.Angle_R, false, false);
+  float ikL2 = sol2.Angle_L, ikR2 = sol2.Angle_R;
+  if (LEG2_INVERTED_MOUNT) { ikL2 = -sol2.Angle_R; ikR2 = -sol2.Angle_L; }
+  uint16_t p0 = map_angle_to_ax12(ikL2, true,  true);
+  uint16_t p1 = map_angle_to_ax12(ikR2, false, true);
+
+  for (int i = 0; i < 4; i++) {
+    if      (legServos[i].id == 6)  legServos[i].goalPos = p6;
+    else if (legServos[i].id == 14) legServos[i].goalPos = p14;
+    else if (legServos[i].id == 0)  legServos[i].goalPos = p0;
+    else if (legServos[i].id == 1)  legServos[i].goalPos = p1;
+  }
+}
 
 void initAX12Legs() {
   for (int i = 0; i < 4; i++) {
@@ -214,19 +303,42 @@ void readIMU(float dt) {
   pitch = alpha * (pitch + gyroRate * dt) + (1.0f - alpha) * accelPitch;
 }
 
-void calibrateIMU() {
+// ── IMU CALIBRATION — non-blocking state machine ─────────────────────────────
+// Was a blocking `for (100) { readIMU(); delay(10); }` — a full 1000 ms with
+// the loop dead: no RX (so commands sent during/just after a calibration were
+// delayed a whole second and often lost to UART FIFO overflow), no motor
+// update, no telemetry. Same 100 samples over the same ~1 s, but now one
+// sample per 100 Hz tick with the loop still servicing everything else.
+// readIMU() is already called once per tick by loop(), so this only
+// accumulates — it must run AFTER readIMU() in the tick.
+const int CAL_SAMPLES = 100;
+bool  calibrating   = false;
+int   calSampleIdx  = 0;
+float calSum        = 0.0f;
+
+void startCalibration() {
+  calibrating  = true;
+  calSampleIdx = 0;
+  calSum       = 0.0f;
   Serial3.println("CAL:START");
-  long double sum = 0;
-  for (int i = 0; i < 100; i++) {
-    readIMU(0.01f);
-    sum += accelPitchRaw;
-    delay(10);
+}
+
+void calibrationTask() {
+  if (!calibrating) return;
+
+  calSum += accelPitchRaw;          // this tick's fresh reading, from readIMU()
+  calSampleIdx++;
+
+  if (calSampleIdx >= CAL_SAMPLES) {
+    pitchOffset = calSum / (float)CAL_SAMPLES;
+    pitch       = 0.0f;
+    integral    = 0.0f;             // offset moved; a stale integral would kick
+    calibrating = false;
+    char buf[48];
+    int n = snprintf(buf, sizeof(buf), "CAL:DONE,OFFSET:%.4f\n", pitchOffset);
+    if (n > 0 && n < (int)sizeof(buf) && Serial3.availableForWrite() >= n)
+      Serial3.write((uint8_t*)buf, n);
   }
-  pitchOffset = (float)(sum / 100.0);
-  pitch = 0.0f;
-  char buf[48];
-  snprintf(buf, sizeof(buf), "CAL:DONE,OFFSET:%.4f", pitchOffset);
-  Serial3.println(buf);
 }
 
 // ── MOTOR DRIVER ──────────────────────────────────────────────────────────────
@@ -273,6 +385,26 @@ void parseCommand(char *cmd) {
     return;
   }
   else if (cmd[0]=='T' && cmd[1]=='G') Ki_trim = atof(cmd + 2);
+  else if (cmd[0]=='P' && cmd[1]=='S') {
+    // Raw per-servo position, e.g. "PS6 750" — bypasses the crouch IK entirely,
+    // for moving/testing exactly one joint. Checked before the single-letter
+    // 'P' (Kp) case below, same ordering rule as every other multi-char prefix
+    // in this parser (else "PS6 750" would parse as Kp = atof("S6 750") = 0).
+    char *sp = strchr(cmd + 2, ' ');
+    if (sp) {
+      int id  = atoi(cmd + 2);
+      int pos = constrain(atoi(sp + 1), 0, 1023);
+      bool found = false;
+      for (int i = 0; i < 4; i++) {
+        if (legServos[i].id == id) { legServos[i].goalPos = (uint16_t)pos; found = true; break; }
+      }
+      snprintf(ack, sizeof(ack), found ? "PS:OK ID%d POS%d" : "PS:ERR UNKNOWN_ID%d", id, pos);
+    } else {
+      snprintf(ack, sizeof(ack), "PS:ERR BAD_FORMAT");
+    }
+    Serial3.println(ack);
+    return;
+  }
   // Balance / tuning commands
   else if (cmd[0] == 'P' && cmd[1] != '\0') Kp = atof(cmd + 1);
   else if (cmd[0] == 'I' && cmd[1] != '\0') Ki = atof(cmd + 1);
@@ -291,7 +423,13 @@ void parseCommand(char *cmd) {
     Serial3.println("ACK:SERVOS_RESET");
     return;
   }
-  else if (cmd[0] == 'C') { calibrateIMU(); return; }
+  else if (cmd[0] == 'C' && cmd[1] == 'R') {
+    // Crouch bar — checked before the bare 'C' (calibrate) case, or "CR40"
+    // would trigger an IMU calibration instead of setting crouch depth.
+    crouchOffset = atof(cmd + 2);
+    updateLegPose();   // legs move (and hold, torque-independent of motorsEnabled)
+  }
+  else if (cmd[0] == 'C') { startCalibration(); return; }
   else if (cmd[0] == 'R') {
     integral  = 0.0f;
     trim_bias = 0.0f;
@@ -316,21 +454,29 @@ void parseCommand(char *cmd) {
 
   // Ack for tuning commands — parsed by _parse_fw_update() in the GUI.
   snprintf(ack, sizeof(ack),
-    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f",
-    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim);
+    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f Crouch:%.2f",
+    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffset);
   uint8_t len = (uint8_t)strlen(ack);
   ack[len] = '\n'; len++;
   if (Serial3.availableForWrite() >= len)
     Serial3.write((uint8_t*)ack, len);
 }
 
-// ── NON-BLOCKING RX — 40 µs budget ────────────────────────────────────────────
+// ── NON-BLOCKING RX — 300 µs budget ──────────────────────────────────────────
+// A byte at 115200 baud is 87 µs, so the old 40 µs budget drained at most ONE
+// byte per call. Combined with the old 50 Hz call rate that made an 8-byte
+// command ("CR40.0\n") take 8 x 20 ms = 160 ms to even reach the parser, and
+// let the 64-byte UART FIFO overflow (silently corrupting commands) whenever
+// the radio delivered a burst. 300 µs is 3% of the 10 ms loop and drains ~3
+// bytes/tick; handleTelemetryRX() is now also called EVERY tick (see loop()).
+const unsigned long RX_BUDGET_US = 300;
+
 static char  rxBuf[48];
 static uint8_t rxLen = 0;
 
 void handleTelemetryRX() {
   unsigned long rxStart = micros();
-  while (Serial3.available() && (micros() - rxStart) < 40) {
+  while (Serial3.available() && (micros() - rxStart) < RX_BUDGET_US) {
     char c = (char)Serial3.read();
     if (c >= 'a' && c <= 'z') c -= 32;         // uppercase in place
     if (c == '\n' || c == '\r') {
@@ -374,6 +520,7 @@ void loop() {
 
   // ── IMU ────────────────────────────────────────────────────────────────
   readIMU(dt);
+  calibrationTask();   // accumulates this tick's sample when a cal is running
 
   // ── SAFETY CUTOFF ───────────────────────────────────────────────────────
   if (fabsf(pitch) > maxSafeTilt && motorsEnabled) {
@@ -394,18 +541,19 @@ void loop() {
   prevEncoderLeft  = encL;
   prevEncoderRight = encR;
 
-  // ── AX-12 torque follows arm state ──────────────────────────────────────
-  static bool prevMotorsEnabled = false;
-  if (motorsEnabled != prevMotorsEnabled) {
-    prevMotorsEnabled = motorsEnabled;
-    for (int i = 0; i < 4; i++) ax12WriteByte(legServos[i].id, 24, motorsEnabled ? 1 : 0);
-  }
+  // Leg torque is intentionally independent of motorsEnabled (the drive-wheel
+  // arm state): pollLegServosTask() below keeps torque enabled and re-asserts
+  // legServos[].goalPos every 20 ms/servo regardless, so the CR<f> crouch bar
+  // can stand/crouch the legs on the bench with the wheel motors disarmed.
 
   // ══════════════════════════════════════════════════════════════════════════
   // THE SINGLE BALANCE PID — the only control loop
   // ══════════════════════════════════════════════════════════════════════════
+  // `calibrating` holds the motors off for the ~1 s sampling window. The old
+  // blocking calibrateIMU() froze the whole loop, so the motors could not act
+  // on a half-settled pitch; now that the loop keeps running, say so explicitly.
   float output = 0.0f;
-  if (!motorsEnabled) {
+  if (!motorsEnabled || calibrating) {
     integral  = 0.0f;
     trim_bias = 0.0f;
     setMotors(0, 0);
@@ -436,36 +584,54 @@ void loop() {
     setMotors(pwm, pwm);                      // no steering — pure balance
   }
 
-  // ── 50 Hz READ/WRITE TOGGLE ─────────────────────────────────────────────
-  // READ tick: poll one servo's health.  WRITE tick: process GUI commands.
+  // ── RX EVERY TICK, SERVO POLL AT 50 Hz ──────────────────────────────────
+  // Uplink commands are latency-critical and the downlink was starving them,
+  // so RX now runs on every 10 ms tick instead of every other one. The servo
+  // health poll keeps its old 50 Hz slot — it is a slow, purely cosmetic read
+  // and pollLegServosTask() already rate-limits itself to POLL_INTERVAL_MS.
+  handleTelemetryRX();
+
   static bool isReadCycle = false;
   isReadCycle = !isReadCycle;
   if (isReadCycle) pollLegServosTask();
-  else             handleTelemetryRX();
 
-  // ── TELEMETRY @ 20 Hz ────────────────────────────────────────────────────
-  if (now - lastPrintTime >= 50000) {
+  // ── TELEMETRY @ 10 Hz ────────────────────────────────────────────────────
+  // Halved from 20 Hz. The 3DR/SiK link is half-duplex with a TDM air protocol:
+  // each end only gets ~half the airtime, so the old ~2.7 kB/s downlink left no
+  // window for the ground unit to transmit, and commands sat in the radio's
+  // buffer for seconds. (latency_test.py measured 97% downlink loss from a
+  // single PING every 2 s — proof the air link had zero headroom.)
+  if (now - lastPrintTime >= 100000) {
     lastPrintTime = now;
 
-    // Balance line (parsed by _parse_telemetry in the GUI)
-    Serial3.print("PITCH:");   Serial3.print(pitch, 2);
-    Serial3.print(",PID_OUT:");Serial3.print(output, 2);
-    Serial3.print(",INT:");    Serial3.print(integral, 4);
-    Serial3.print(",EL:");     Serial3.print(encL);
-    Serial3.print(",ER:");     Serial3.print(encR);
-    Serial3.print(",VEL:");    Serial3.print(vel_current, 1);
-    Serial3.print(",MOT:");    Serial3.print((int)motorsEnabled);
-    Serial3.print(",TILT:");   Serial3.print(maxSafeTilt, 1);
-    Serial3.print(",TRIM:");   Serial3.print(trim_bias, 3);
-    Serial3.print(",ATE:");    Serial3.print((int)autoTrimEnabled);
-    Serial3.print(",LATCH:");  Serial3.println((int)safetyLatched);
+    // Build the balance line into one buffer and hand it to the UART in a
+    // single guarded write. The old per-field Serial3.print() calls BLOCK once
+    // the radio backs up, stretching the 100 Hz loop's dt and delaying RX
+    // further — the ack path in parseCommand() already guards this way.
+    char line[192];
+    int n = snprintf(line, sizeof(line),
+      "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,"
+      "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d\n",
+      pitch, output, integral, encL, encR, vel_current,
+      (int)motorsEnabled, maxSafeTilt, trim_bias,
+      (int)autoTrimEnabled, (int)safetyLatched);
 
-    // One servo-health line per telemetry frame (round-robin), SRV:id,temp,load
-    static uint8_t healthIdx = 0;
-    ServoState &h = legServos[healthIdx];
-    Serial3.print("SRV:");  Serial3.print(h.id);
-    Serial3.print(",");     Serial3.print(h.temp);
-    Serial3.print(",");     Serial3.println(h.loadPct, 1);
-    healthIdx = (healthIdx + 1) % 4;
+    if (n > 0 && n < (int)sizeof(line) && Serial3.availableForWrite() >= n)
+      Serial3.write((uint8_t*)line, n);
+
+    // Servo health at 1 Hz (round-robin one servo per second) instead of one
+    // line per telemetry frame. Temperature and load are slow-moving; sending
+    // them 20x/s was pure air-time waste competing with the uplink.
+    static uint8_t healthIdx   = 0;
+    static unsigned long lastHealth = 0;
+    if (now - lastHealth >= 1000000) {
+      lastHealth = now;
+      ServoState &h = legServos[healthIdx];
+      int m = snprintf(line, sizeof(line), "SRV:%u,%u,%.1f\n",
+                       (unsigned)h.id, (unsigned)h.temp, h.loadPct);
+      if (m > 0 && m < (int)sizeof(line) && Serial3.availableForWrite() >= m)
+        Serial3.write((uint8_t*)line, m);
+      healthIdx = (healthIdx + 1) % 4;
+    }
   }
 }

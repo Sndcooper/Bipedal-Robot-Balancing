@@ -49,8 +49,16 @@ PARAM_SPECS = [
     ParamSpec("alpha",       "alpha",  0.80, 0.999, 0.001, 0.02, 0.0001, 4,  0.96),
     ParamSpec("maxSafeTilt", "Max Tilt",5.0,  50.0, 0.1,   5.0,  0.01,   2,  25.0),
     # Auto-trim: gain of the opt-in drift-cancelling bias (see firmware AUTO-TRIM
-    # block). Same order of magnitude as RC_mcu_IK_wireless's Ki_vel (0.001).
-    ParamSpec("Ki_trim",     "Trim Gain",0.0, 0.02, 0.0005,0.002,0.00005, 5, 0.001),
+    # block). Range derived from the 100Hz loop + 15deg clamp: below ~0.0033 a
+    # mild drift (~10 counts/s) takes over 30s to produce 1deg of correction;
+    # above ~0.03 a single 10ms tick can move the bias >1% of the whole clamp,
+    # i.e. it stops acting like a slow trim and starts acting like a step.
+    ParamSpec("Ki_trim",     "Trim Gain",0.0, 0.03, 0.001, 0.003,0.0001, 5, 0.001),
+    # Crouch bar: 0 = standing (original calibrated pose), + = crouched (mm the
+    # foot target is pulled toward the hip). Works with motorsEnabled off — see
+    # firmware AUTO-TRIM/CROUCH IK blocks. Capped well short of the 5-bar's
+    # reach-circle singularity (see leg-ik-and-servos skill).
+    ParamSpec("crouchOffset","Crouch",   0.0, 80.0, 1.0,   10.0, 0.1,    1,   0.0),
 ]
 
 
@@ -70,6 +78,7 @@ class CoarseFineSlider(ttk.Frame):
         self._user_dragging     = False
         self._entry_focused     = False
         self._awaiting_echo     = False
+        self._echo_deadline     = 0.0
 
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=0)
@@ -129,7 +138,11 @@ class CoarseFineSlider(ttk.Frame):
         if self._debounce_id is not None:
             self.after_cancel(self._debounce_id)
         if self._user_dragging:
-            self._debounce_id = self.after(150, self._send_now)
+            # 300 ms, up from 150 ms. Each drag step that survives the debounce
+            # costs an uplink transmission on a half-duplex radio, and a burst
+            # of them queues for seconds. _on_release() still fires _send_now()
+            # immediately, so the final value is never delayed by this.
+            self._debounce_id = self.after(300, self._send_now)
 
     def _apply_zoom_mode(self):
         cur = float(self._value.get())
@@ -177,6 +190,11 @@ class CoarseFineSlider(ttk.Frame):
             return
         self._last_sent = v
         self._awaiting_echo = True
+        # Self-healing deadline: mark_echo_received() only clears this flag on a
+        # matching ack, and acks DO get dropped on this radio. Without a timeout
+        # the flag latches True forever and sync_from_external() goes dead, so the
+        # slider stops tracking firmware for the rest of the session.
+        self._echo_deadline = time.time() + 2.0
         self.on_change_callback(self.spec.key, v)
 
     def apply_entry_value(self):
@@ -194,6 +212,8 @@ class CoarseFineSlider(ttk.Frame):
         self._send_now()
 
     def sync_from_external(self, value: float):
+        if self._awaiting_echo and time.time() > self._echo_deadline:
+            self._awaiting_echo = False        # ack lost — stop ignoring firmware
         if self._user_dragging or self._awaiting_echo or self._entry_focused:
             return
         value = self._clamp(self._quantize(value))
@@ -222,7 +242,7 @@ class BalanceApp(tk.Tk):
         self.link = None
         self._plot_max = 250
 
-        self.port_var         = tk.StringVar(value="COM3")
+        self.port_var         = tk.StringVar(value="COM13")
         self.status_var       = tk.StringVar(value="Disconnected")
         self.motor_var        = tk.StringVar(value="Motors: OFF")
         self.cutoff_var       = tk.StringVar(value="Safety: clear")
@@ -287,6 +307,7 @@ class BalanceApp(tk.Tk):
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=3)
         body.rowconfigure(1, weight=1)
+        body.rowconfigure(2, weight=0)
 
         # -- live telemetry plot --
         plot_frame = ttk.LabelFrame(body, text="Live Telemetry")
@@ -314,7 +335,7 @@ class BalanceApp(tk.Tk):
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         # -- single-loop PID controls --
-        pid_frame = ttk.LabelFrame(body, text="Balance PID  (single control loop)")
+        pid_frame = ttk.LabelFrame(body, text="Tuning  (balance PID + auto-trim + crouch)")
         pid_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
         self.sliders = {}
         for spec in PARAM_SPECS:
@@ -333,6 +354,36 @@ class BalanceApp(tk.Tk):
             lbl.pack(fill=tk.X, pady=2, padx=5)
             self.health_labels[sid] = lbl
 
+        # -- raw per-servo position control (bypasses crouch IK entirely) --
+        # Ported from the pre-variant-split GUI's "Send Pose to Servos" panel
+        # (git 4e54920), adapted to raw AX-12 position rather than IK foot
+        # targets — moves exactly one joint, useful for confirming which
+        # physical leg an ID corresponds to and for freeing/testing a stuck
+        # joint without going through the crouch solver. Explicit per-row
+        # Send button (no live-drag-send) so nothing moves without a
+        # deliberate click. Defaults are each servo's calibrated standing
+        # position, not 0 — dragging to an extreme and hitting Send is on you.
+        servo_ctrl_frame = ttk.LabelFrame(
+            body, text="Servo Control (raw position, bypasses crouch IK — verify a joint moves freely by hand before sending)")
+        servo_ctrl_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.servo_pos_vars = {}
+        for sid, name, default_pos in [
+            (6,  "Leg1 Left  (ID 6)",  818),
+            (14, "Leg1 Right (ID 14)", 441),
+            (0,  "Leg2 Left  (ID 0)",  818),
+            (1,  "Leg2 Right (ID 1)",  441),
+        ]:
+            row = ttk.Frame(servo_ctrl_frame)
+            row.pack(fill=tk.X, padx=5, pady=3)
+            ttk.Label(row, text=name, width=18).pack(side=tk.LEFT)
+            var = tk.IntVar(value=default_pos)
+            self.servo_pos_vars[sid] = var
+            tk.Scale(row, orient=tk.HORIZONTAL, from_=0, to=1023,
+                     variable=var, length=300, showvalue=True).pack(side=tk.LEFT, padx=5)
+            ttk.Button(row, text="Send", width=6,
+                       command=lambda s=sid, v=var: self.send_servo_position(s, v.get())
+                       ).pack(side=tk.LEFT, padx=5)
+
     # ── slider dispatch (single loop only) ───────────────────────────────────
     def _on_slider(self, key, val):
         if not (self.link and self.link.ser):
@@ -345,6 +396,7 @@ class BalanceApp(tk.Tk):
         elif key == "alpha":       lk.set_alpha(val)
         elif key == "maxSafeTilt": lk.set_tilt(val)
         elif key == "Ki_trim":     lk.set_trim_gain(val)
+        elif key == "crouchOffset":lk.set_crouch(val)
 
     # ── connection / actions ─────────────────────────────────────────────────
     def connect(self):
@@ -386,6 +438,11 @@ class BalanceApp(tk.Tk):
             self.link.commit_trim()
             self.status_var.set("Trim commit sent")
 
+    def send_servo_position(self, servo_id, pos):
+        if self.link:
+            self.link.set_servo_position(servo_id, pos)
+            self.status_var.set(f"Sent PS{servo_id} {pos}")
+
     def set_manual_offset(self):
         if self.link:
             try:
@@ -419,6 +476,10 @@ class BalanceApp(tk.Tk):
             for spec in PARAM_SPECS:
                 val = self.link.fw.get(spec.key)
                 if val is not None and spec.key in self.sliders:
+                    # Clear the pending-echo flag first: the firmware's
+                    # "Updated ->" ack IS the confirmation, and until this is
+                    # called the slider ignores every firmware value it sees.
+                    self.sliders[spec.key].mark_echo_received(float(val))
                     self.sliders[spec.key].sync_from_external(float(val))
 
             snap = self.link.snapshot()
