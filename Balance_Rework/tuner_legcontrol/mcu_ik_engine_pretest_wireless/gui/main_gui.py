@@ -2,10 +2,13 @@
 main_gui.py
 Single-Loop Wireless Balance Tuner — 3DR telemetry edition.
 
-Deliberately minimal: ONE balance PID (Kp, Ki, Kd) plus setpoint / filter /
-safety / calibration. No cascade, no IK, no RC. Everything lives on one screen:
-live telemetry plot, the single-loop controls, live servo health, and a serial
-monitor. Pairs with the single-loop balancing firmware in ../firmware.
+Deliberately minimal control loop: ONE balance PID (Kp, Ki, Kd) plus setpoint /
+filter / safety / calibration / auto-trim / crouch. No cascade, no full IK, no
+RC. Laid out like the RC_mcu_IK_wireless GUI: a shared header (connection,
+arm/disarm, calibration, save) above a two-tab Notebook —
+  1. Balance Tuner        — live telemetry plot, tuning sliders, serial monitor
+  2. Kinematics & Health   — live servo health, raw per-servo position control
+Pairs with the single-loop balancing firmware in ../firmware.
 """
 
 import tkinter as tk
@@ -40,7 +43,8 @@ class ParamSpec:
 
 
 # The single control loop is Kp/Ki/Kd. Target is the setpoint the loop holds to;
-# alpha is IMU fusion; Tilt is the safety cutoff — none of these are extra loops.
+# alpha is IMU fusion; Tilt is the safety cutoff; Trim Gain/Crouch are the two
+# opt-in add-ons (auto-trim, crouch IK) — none of these are extra control loops.
 PARAM_SPECS = [
     ParamSpec("Kp",          "Kp",     0.0,  200.0, 0.1,   5.0,  0.01,   3,  78.0),
     ParamSpec("Ki",          "Ki",     0.0, 1000.0, 0.5,   1.0,  0.001,  4,   0.0),
@@ -56,8 +60,9 @@ PARAM_SPECS = [
     ParamSpec("Ki_trim",     "Trim Gain",0.0, 0.03, 0.001, 0.003,0.0001, 5, 0.001),
     # Crouch bar: 0 = standing (original calibrated pose), + = crouched (mm the
     # foot target is pulled toward the hip). Works with motorsEnabled off — see
-    # firmware AUTO-TRIM/CROUCH IK blocks. Capped well short of the 5-bar's
-    # reach-circle singularity (see leg-ik-and-servos skill).
+    # firmware CROUCH IK block. Capped well short of the 5-bar's reach-circle
+    # singularity (see leg-ik-and-servos skill). Lives on the main tuner screen
+    # alongside the balance controls, not on the Kinematics & Health tab.
     ParamSpec("crouchOffset","Crouch",   0.0, 80.0, 1.0,   10.0, 0.1,    1,   0.0),
 ]
 
@@ -230,17 +235,201 @@ class CoarseFineSlider(ttk.Frame):
 
 
 # ---------------------------------------------------------------------------
-# Main Application — single screen
+# TAB 1: Balance Tuner — plot, tuning sliders (incl. Crouch), serial monitor
 # ---------------------------------------------------------------------------
-class BalanceApp(tk.Tk):
+class BalanceTunerTab(ttk.Frame):
+    def __init__(self, master, app):
+        super().__init__(master)
+        self.app       = app
+        self._plot_max = 250
+        self._build_ui()
+
+    def _build_ui(self):
+        self.columnconfigure(0, weight=2)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=3, minsize=280)
+        left.rowconfigure(1, weight=1)
+
+        plot_frame = ttk.LabelFrame(left, text="Live Telemetry")
+        plot_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+
+        self.fig = Figure(figsize=(6, 4), dpi=100)
+        self.ax  = self.fig.add_subplot(111)
+        self.ax2 = self.ax.twinx()
+        self.ax.grid(True, alpha=0.25)
+        self.pitch_line,  = self.ax.plot([], [], color="#1f77b4", label="pitch")
+        self.target_line, = self.ax.plot([], [], color="#2ca02c", ls="--", label="target")
+        self.trim_line,   = self.ax.plot([], [], color="#d62728", ls=":", label="trim")
+        self.pid_line,    = self.ax2.plot([], [], color="#ff7f0e", alpha=0.9, label="pid_out")
+        self.vel_line,    = self.ax2.plot([], [], color="#9467bd", alpha=0.6, label="vel")
+        self.ax.set_ylabel("angle (°)")
+        self.ax2.set_ylabel("pid / vel")
+        self.ax.legend(loc="upper left", fontsize=8)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        log_frame = ttk.LabelFrame(left, text="Serial Monitor")
+        log_frame.grid(row=1, column=0, sticky="nsew")
+        self.log_text = tk.Text(log_frame, height=8, state=tk.DISABLED)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        # -- tuning: balance PID + auto-trim gain + crouch, all on this screen --
+        tuning_frame = ttk.LabelFrame(self, text="Tuning  (balance PID + auto-trim + crouch)")
+        tuning_frame.grid(row=0, column=1, sticky="nsew")
+        self.sliders = {}
+        for spec in PARAM_SPECS:
+            ctrl = CoarseFineSlider(tuning_frame, spec, spec.start_val, self._on_slider)
+            ctrl.pack(fill=tk.X, pady=4, padx=5)
+            self.sliders[spec.key] = ctrl
+
+    def _on_slider(self, key, val):
+        if not (self.app.link and self.app.link.ser):
+            return
+        lk = self.app.link
+        if   key == "Kp":          lk.set_kp(val)
+        elif key == "Ki":          lk.set_ki(val)
+        elif key == "Kd":          lk.set_kd(val)
+        elif key == "targetAngle": lk.set_target(val)
+        elif key == "alpha":       lk.set_alpha(val)
+        elif key == "maxSafeTilt": lk.set_tilt(val)
+        elif key == "Ki_trim":     lk.set_trim_gain(val)
+        elif key == "crouchOffset":lk.set_crouch(val)
+
+    def update_tab(self):
+        app = self.app
+        if not app.link:
+            return
+
+        for spec in PARAM_SPECS:
+            val = app.link.fw.get(spec.key)
+            if val is not None and spec.key in self.sliders:
+                # Clear the pending-echo flag first: the firmware's "Updated ->"
+                # ack IS the confirmation, and until this is called the slider
+                # ignores every firmware value it sees.
+                self.sliders[spec.key].mark_echo_received(float(val))
+                self.sliders[spec.key].sync_from_external(float(val))
+
+        snap = app.link.snapshot()
+        if snap and snap.get("pitch"):
+            app.pitch_var.set(f"Angle: {snap['pitch'][-1]:+.2f}°")
+            n      = min(len(snap["pitch"]), self._plot_max)
+            x      = list(range(n))
+            target = app.link.fw.get("targetAngle", 0.0)
+            self.pitch_line.set_data(x, snap["pitch"][-n:])
+            self.target_line.set_data(x, [float(target)] * n)
+            self.pid_line.set_data(x, snap["pid_out"][-n:])
+            self.vel_line.set_data(x, snap["vel"][-n:])
+            self.trim_line.set_data(x, snap.get("trim", [])[-n:])
+            self.ax.set_xlim(0, max(1, n - 1))
+            self.ax.set_ylim(-15, 15)
+            self.ax2.set_ylim(-260, 260)
+            self.canvas.draw_idle()
+
+            trim_hist = snap.get("trim", [])
+            if trim_hist:
+                state = "auto" if app.link.auto_trim_on else "idle"
+                app.trim_var.set(f"Trim: {trim_hist[-1]:+.3f}° ({state})")
+        else:
+            app.pitch_var.set("Angle: --°")
+
+        lines = app.link.recent_lines(50)
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.insert(tk.END, "\n".join(lines))
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+
+
+# ---------------------------------------------------------------------------
+# TAB 2: Kinematics & Health — servo health + raw per-servo position control
+# ---------------------------------------------------------------------------
+class KinematicsHealthTab(ttk.Frame):
     SERVO_NAMES = {6: "Leg1 L", 14: "Leg1 R", 0: "Leg2 L", 1: "Leg2 R"}
 
+    def __init__(self, master, app):
+        super().__init__(master)
+        self.app = app
+        self._build_ui()
+
+    def _build_ui(self):
+        # -- live servo health --
+        health_frame = ttk.LabelFrame(self, text="Live Servo Health")
+        health_frame.pack(fill=tk.X, padx=5, pady=(5, 8))
+        self.health_labels = {}
+        for sid, name in [(6, "Leg1 L"), (14, "Leg1 R"), (0, "Leg2 L"), (1, "Leg2 R")]:
+            lbl = tk.Label(health_frame,
+                           text=f"ID {sid} ({name}): --°C  |  Load: --%",
+                           font=("Consolas", 10, "bold"), bg="#eeeeee", fg="black", pady=6)
+            lbl.pack(fill=tk.X, pady=2, padx=5)
+            self.health_labels[sid] = lbl
+
+        # -- raw per-servo position control (bypasses crouch IK entirely) --
+        # Ported from the pre-variant-split GUI's "Send Pose to Servos" panel
+        # (git 4e54920), adapted to raw AX-12 position rather than IK foot
+        # targets — moves exactly one joint, useful for confirming which
+        # physical leg an ID corresponds to and for freeing/testing a stuck
+        # joint without going through the crouch solver. Explicit per-row
+        # Send button (no live-drag-send) so nothing moves without a
+        # deliberate click. Defaults are each servo's calibrated standing
+        # position, not 0 — dragging to an extreme and hitting Send is on you.
+        servo_ctrl_frame = ttk.LabelFrame(
+            self, text="Servo Control (raw position, bypasses crouch IK — verify a joint moves freely by hand before sending)")
+        servo_ctrl_frame.pack(fill=tk.X, padx=5, pady=(0, 8))
+        self.servo_pos_vars = {}
+        for sid, name, default_pos in [
+            (6,  "Leg1 Left  (ID 6)",  818),
+            (14, "Leg1 Right (ID 14)", 441),
+            (0,  "Leg2 Left  (ID 0)",  818),
+            (1,  "Leg2 Right (ID 1)",  441),
+        ]:
+            row = ttk.Frame(servo_ctrl_frame)
+            row.pack(fill=tk.X, padx=5, pady=3)
+            ttk.Label(row, text=name, width=18).pack(side=tk.LEFT)
+            var = tk.IntVar(value=default_pos)
+            self.servo_pos_vars[sid] = var
+            tk.Scale(row, orient=tk.HORIZONTAL, from_=0, to=1023,
+                     variable=var, length=300, showvalue=True).pack(side=tk.LEFT, padx=5)
+            ttk.Button(row, text="Send", width=6,
+                       command=lambda s=sid, v=var: self.send_servo_position(s, v.get())
+                       ).pack(side=tk.LEFT, padx=5)
+
+    def send_servo_position(self, servo_id, pos):
+        if self.app.link:
+            self.app.link.set_servo_position(servo_id, pos)
+            self.app.status_var.set(f"Sent PS{servo_id} {pos}")
+
+    def update_tab(self):
+        if not self.app.link:
+            return
+        for sid, data in self.app.link.get_servo_health().items():
+            if sid not in self.health_labels:
+                continue
+            temp, load = data["temp"], data["load"]
+            lbl = self.health_labels[sid]
+            lbl.config(text=f"ID {sid} ({self.SERVO_NAMES.get(sid, '?')}): {temp}°C  |  Load: {load:.1f}%")
+            if temp >= 65:
+                lbl.config(bg="#ff3333", fg="white")
+            elif temp >= 55:
+                lbl.config(bg="#ffaa00", fg="black")
+            else:
+                lbl.config(bg="#eeeeee", fg="black")
+
+
+# ---------------------------------------------------------------------------
+# Main Application — shared header + 2-tab Notebook (mirrors RC_mcu_IK_wireless)
+# ---------------------------------------------------------------------------
+class BalanceApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Single-Loop Wireless Balance Tuner")
-        self.geometry("1200x760")
+        self.geometry("1200x850")
+        self.minsize(1000, 700)
         self.link = None
-        self._plot_max = 250
 
         self.port_var         = tk.StringVar(value="COM13")
         self.status_var       = tk.StringVar(value="Disconnected")
@@ -253,12 +442,19 @@ class BalanceApp(tk.Tk):
         self.auto_trim_var    = tk.BooleanVar(value=False)
 
         self._build_header()
-        self._build_body()
+
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.tab_tuner = BalanceTunerTab(self.notebook, self)
+        self.tab_legs  = KinematicsHealthTab(self.notebook, self)
+        self.notebook.add(self.tab_tuner, text="1. Balance Tuner")
+        self.notebook.add(self.tab_legs,  text="2. Kinematics & Health")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self._poll)
 
-    # ── header: connection + actions + status ────────────────────────────────
+    # ── header: connection + actions + status (shared across both tabs) ─────
     def _build_header(self):
         top = ttk.Frame(self, padding=8)
         top.pack(fill=tk.X)
@@ -298,105 +494,6 @@ class BalanceApp(tk.Tk):
         ttk.Label(top, textvariable=self.status_var).pack(side=tk.RIGHT, padx=8)
         ttk.Label(top, textvariable=self.pitch_var,
                   font=("Consolas", 13, "bold"), foreground="#1f77b4").pack(side=tk.RIGHT, padx=12)
-
-    # ── body: telemetry plot + monitor (left) | PID + health (right) ─────────
-    def _build_body(self):
-        body = ttk.Frame(self, padding=(10, 0, 10, 10))
-        body.pack(fill=tk.BOTH, expand=True)
-        body.columnconfigure(0, weight=3)
-        body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=3)
-        body.rowconfigure(1, weight=1)
-        body.rowconfigure(2, weight=0)
-
-        # -- live telemetry plot --
-        plot_frame = ttk.LabelFrame(body, text="Live Telemetry")
-        plot_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=(0, 8))
-
-        self.fig = Figure(figsize=(6, 4), dpi=100)
-        self.ax  = self.fig.add_subplot(111)
-        self.ax2 = self.ax.twinx()
-        self.ax.grid(True, alpha=0.25)
-        self.pitch_line,  = self.ax.plot([], [], color="#1f77b4", label="pitch")
-        self.target_line, = self.ax.plot([], [], color="#2ca02c", ls="--", label="target")
-        self.trim_line,   = self.ax.plot([], [], color="#d62728", ls=":", label="trim")
-        self.pid_line,    = self.ax2.plot([], [], color="#ff7f0e", alpha=0.9, label="pid_out")
-        self.vel_line,    = self.ax2.plot([], [], color="#9467bd", alpha=0.6, label="vel")
-        self.ax.set_ylabel("angle (°)")
-        self.ax2.set_ylabel("pid / vel")
-        self.ax.legend(loc="upper left", fontsize=8)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        # -- serial monitor --
-        log_frame = ttk.LabelFrame(body, text="Serial Monitor")
-        log_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
-        self.log_text = tk.Text(log_frame, height=8, state=tk.DISABLED)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
-        # -- single-loop PID controls --
-        pid_frame = ttk.LabelFrame(body, text="Tuning  (balance PID + auto-trim + crouch)")
-        pid_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
-        self.sliders = {}
-        for spec in PARAM_SPECS:
-            ctrl = CoarseFineSlider(pid_frame, spec, spec.start_val, self._on_slider)
-            ctrl.pack(fill=tk.X, pady=4, padx=5)
-            self.sliders[spec.key] = ctrl
-
-        # -- servo health --
-        health_frame = ttk.LabelFrame(body, text="Live Servo Health")
-        health_frame.grid(row=1, column=1, sticky="nsew")
-        self.health_labels = {}
-        for sid, name in [(6, "Leg1 L"), (14, "Leg1 R"), (0, "Leg2 L"), (1, "Leg2 R")]:
-            lbl = tk.Label(health_frame,
-                           text=f"ID {sid} ({name}): --°C  |  Load: --%",
-                           font=("Consolas", 10, "bold"), bg="#eeeeee", fg="black", pady=6)
-            lbl.pack(fill=tk.X, pady=2, padx=5)
-            self.health_labels[sid] = lbl
-
-        # -- raw per-servo position control (bypasses crouch IK entirely) --
-        # Ported from the pre-variant-split GUI's "Send Pose to Servos" panel
-        # (git 4e54920), adapted to raw AX-12 position rather than IK foot
-        # targets — moves exactly one joint, useful for confirming which
-        # physical leg an ID corresponds to and for freeing/testing a stuck
-        # joint without going through the crouch solver. Explicit per-row
-        # Send button (no live-drag-send) so nothing moves without a
-        # deliberate click. Defaults are each servo's calibrated standing
-        # position, not 0 — dragging to an extreme and hitting Send is on you.
-        servo_ctrl_frame = ttk.LabelFrame(
-            body, text="Servo Control (raw position, bypasses crouch IK — verify a joint moves freely by hand before sending)")
-        servo_ctrl_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.servo_pos_vars = {}
-        for sid, name, default_pos in [
-            (6,  "Leg1 Left  (ID 6)",  818),
-            (14, "Leg1 Right (ID 14)", 441),
-            (0,  "Leg2 Left  (ID 0)",  818),
-            (1,  "Leg2 Right (ID 1)",  441),
-        ]:
-            row = ttk.Frame(servo_ctrl_frame)
-            row.pack(fill=tk.X, padx=5, pady=3)
-            ttk.Label(row, text=name, width=18).pack(side=tk.LEFT)
-            var = tk.IntVar(value=default_pos)
-            self.servo_pos_vars[sid] = var
-            tk.Scale(row, orient=tk.HORIZONTAL, from_=0, to=1023,
-                     variable=var, length=300, showvalue=True).pack(side=tk.LEFT, padx=5)
-            ttk.Button(row, text="Send", width=6,
-                       command=lambda s=sid, v=var: self.send_servo_position(s, v.get())
-                       ).pack(side=tk.LEFT, padx=5)
-
-    # ── slider dispatch (single loop only) ───────────────────────────────────
-    def _on_slider(self, key, val):
-        if not (self.link and self.link.ser):
-            return
-        lk = self.link
-        if   key == "Kp":          lk.set_kp(val)
-        elif key == "Ki":          lk.set_ki(val)
-        elif key == "Kd":          lk.set_kd(val)
-        elif key == "targetAngle": lk.set_target(val)
-        elif key == "alpha":       lk.set_alpha(val)
-        elif key == "maxSafeTilt": lk.set_tilt(val)
-        elif key == "Ki_trim":     lk.set_trim_gain(val)
-        elif key == "crouchOffset":lk.set_crouch(val)
 
     # ── connection / actions ─────────────────────────────────────────────────
     def connect(self):
@@ -438,11 +535,6 @@ class BalanceApp(tk.Tk):
             self.link.commit_trim()
             self.status_var.set("Trim commit sent")
 
-    def send_servo_position(self, servo_id, pos):
-        if self.link:
-            self.link.set_servo_position(servo_id, pos)
-            self.status_var.set(f"Sent PS{servo_id} {pos}")
-
     def set_manual_offset(self):
         if self.link:
             try:
@@ -457,7 +549,7 @@ class BalanceApp(tk.Tk):
         os.makedirs(profiles_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename  = os.path.join(profiles_dir, f"params_{timestamp}.json")
-        data = {key: slider.get_value() for key, slider in self.sliders.items()}
+        data = {key: slider.get_value() for key, slider in self.tab_tuner.sliders.items()}
         try:
             with open(filename, "w") as f:
                 json.dump(data, f, indent=4)
@@ -465,70 +557,21 @@ class BalanceApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
-    # ── periodic refresh ──────────────────────────────────────────────────────
+    # ── periodic refresh — only the active tab does plotting/redraw work ─────
     def _poll(self):
         if self.link:
             self.motor_var.set(f"Motors: {'ON' if self.link.motors_on else 'OFF'}")
             self.cutoff_var.set("Safety: LATCHED!" if self.link.cutoff_since() else "Safety: clear")
             self.auto_trim_var.set(self.link.auto_trim_on)
 
-            # mirror firmware-confirmed values back onto the sliders
-            for spec in PARAM_SPECS:
-                val = self.link.fw.get(spec.key)
-                if val is not None and spec.key in self.sliders:
-                    # Clear the pending-echo flag first: the firmware's
-                    # "Updated ->" ack IS the confirmation, and until this is
-                    # called the slider ignores every firmware value it sees.
-                    self.sliders[spec.key].mark_echo_received(float(val))
-                    self.sliders[spec.key].sync_from_external(float(val))
-
-            snap = self.link.snapshot()
-            if snap and snap.get("pitch"):
-                self.pitch_var.set(f"Angle: {snap['pitch'][-1]:+.2f}°")
-                n       = min(len(snap["pitch"]), self._plot_max)
-                x       = list(range(n))
-                target  = self.link.fw.get("targetAngle", 0.0)
-                self.pitch_line.set_data(x, snap["pitch"][-n:])
-                self.target_line.set_data(x, [float(target)] * n)
-                self.pid_line.set_data(x, snap["pid_out"][-n:])
-                self.vel_line.set_data(x, snap["vel"][-n:])
-                self.trim_line.set_data(x, snap.get("trim", [])[-n:])
-                self.ax.set_xlim(0, max(1, n - 1))
-                self.ax.set_ylim(-15, 15)
-                self.ax2.set_ylim(-260, 260)
-                self.canvas.draw_idle()
-            else:
-                self.pitch_var.set("Angle: --°")
-
             offset_val = self.link.fw.get("pitchOffset")
             self.offset_var.set(f"Offset: {offset_val:.2f}" if offset_val is not None else "Offset: --")
 
-            trim_hist = snap.get("trim", [])
-            if trim_hist:
-                state = "auto" if self.link.auto_trim_on else "idle"
-                self.trim_var.set(f"Trim: {trim_hist[-1]:+.3f}° ({state})")
-
-            # servo health
-            for sid, data in self.link.get_servo_health().items():
-                if sid not in self.health_labels:
-                    continue
-                temp, load = data["temp"], data["load"]
-                lbl = self.health_labels[sid]
-                lbl.config(text=f"ID {sid} ({self.SERVO_NAMES.get(sid, '?')}): {temp}°C  |  Load: {load:.1f}%")
-                if temp >= 65:
-                    lbl.config(bg="#ff3333", fg="white")
-                elif temp >= 55:
-                    lbl.config(bg="#ffaa00", fg="black")
-                else:
-                    lbl.config(bg="#eeeeee", fg="black")
-
-            # serial monitor
-            lines = self.link.recent_lines(50)
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.delete("1.0", tk.END)
-            self.log_text.insert(tk.END, "\n".join(lines))
-            self.log_text.see(tk.END)
-            self.log_text.config(state=tk.DISABLED)
+            active_tab = self.notebook.index(self.notebook.select())
+            if active_tab == 0:
+                self.tab_tuner.update_tab()
+            elif active_tab == 1:
+                self.tab_legs.update_tab()
 
         self.after(100, self._poll)
 
