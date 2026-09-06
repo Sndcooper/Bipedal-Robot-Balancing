@@ -109,11 +109,19 @@ struct ServoState {
   float    loadPct;
 };
 
+// Torque/compliance restored to the responsive baseline (was 511 / margin 4 /
+// slope 32). Slope 32 is an 8x wider proportional band and margin 4 a wide
+// deadband, which together make the servo ease in slowly and hold weakly — the
+// joint visibly creeps toward its target under the robot's own weight, which
+// reads as "slow servos" independently of any serial latency.
+//   torqueLimit 511 -> 1023 : full holding torque (see note: doubles jam force)
+//   compMargin     4 -> 1   : narrow deadband, reacts to small errors
+//   compSlope     32 -> 4   : tight proportional band, no sluggish ease-in
 ServoState legServos[4] = {
-  {6,  818, 511, 4, 32, 0, 0.0f},   // Leg1 Left  (818 = straight-down left)
-  {0,  818, 511, 4, 32, 0, 0.0f},   // Leg2 Left
-  {14, 441, 511, 4, 32, 0, 0.0f},   // Leg1 Right (441 = straight-down right)
-  {1,  441, 511, 4, 32, 0, 0.0f},   // Leg2 Right
+  {6,  818, 1023, 1, 4, 0, 0.0f},   // Leg1 Left  (818 = straight-down left)
+  {0,  818, 1023, 1, 4, 0, 0.0f},   // Leg2 Left
+  {14, 441, 1023, 1, 4, 0, 0.0f},   // Leg1 Right (441 = straight-down right)
+  {1,  441, 1023, 1, 4, 0, 0.0f},   // Leg2 Right
 };
 
 // ── CROUCH IK (opt-in, one degree of freedom: stand tall <-> crouch) ────────
