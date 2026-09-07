@@ -291,6 +291,43 @@ ServoState legServos[4] = {
   {1,  441, 1023, 1, 4, 0, 0.0f},   // Leg2 Right
 };
 
+// ── GLOBAL SERVO SETTINGS (ported from ax12_control — applies to all four) ───
+// Identical to what the balancing firmware hard-codes in initAX12Legs() but now
+// live-tunable from the GUI without reflashing. markAllSettingsDirty() queues
+// an applySettingsTask() spread — one servo per 100 Hz tick — so a compliance
+// slider drag costs ~630 µs (4 ticks) instead of 2.5 ms in one shot.
+uint16_t g_torqueLimit = 1023;   // addr 34, 0-1023  (1023 = full holding torque)
+uint8_t  g_compMargin  = 1;      // addr 26/27, 0-254 (narrow deadband)
+uint8_t  g_compSlope   = 4;      // addr 28/29, 0-254 (tight proportional band)
+uint16_t g_movingSpeed = 0;      // addr 32, 0-1023  (0 = uncapped, servos race at max speed)
+bool     g_torqueOn    = true;   // addr 24 master kill: false = limp legs
+
+// Dirty bitmask — one bit per legServos[] index. Set by any settings command,
+// drained one servo per tick by applySettingsTask(). Prevents the 2.5 ms
+// blocking bath that would quarter the loop's free time.
+uint8_t settingsDirtyMask = 0x0F;  // push all registers at first boot tick
+void markAllSettingsDirty() { settingsDirtyMask = 0x0F; }
+
+// ── POSE TRAJECTORY ENGINE (ported verbatim from ax12_control) ───────────────
+// Two mutually exclusive pose modes. In CROUCH the foot x is pinned to the
+// calibrated default and one knob slides it vertically; in IK the dragged (x,y)
+// is used as-is. Only CROUCH is available when the balance PID is active (it
+// maps 1-to-1 with the existing crouchOffset path). IK is for bench posing.
+#define MODE_CROUCH 0
+#define MODE_IK     1
+uint8_t  poseMode   = MODE_CROUCH;
+
+uint16_t moveTimeMs = 800;              // MT<n>, 100-3000 ms per move
+bool     moveActive = false;
+unsigned long moveStartMs = 0;
+float mv_x0[2], mv_y0[2];               // where the move started
+float mv_x1[2], mv_y1[2];               // where it ends
+float cur_x[2] = {1.0f, -6.0f};         // authoritative current foot position (mm)
+float cur_y[2] = {-151.1f, -149.6f};
+float ft_x[2]  = {1.0f, -6.0f};         // IK-mode commanded foot targets (mm)
+float ft_y[2]  = {-151.1f, -149.6f};
+bool  ikValid[2] = {true, true};         // last solve was in-reach?
+
 // ── CROUCH IK (opt-in, one degree of freedom: stand tall <-> crouch) ────────
 // Ports the 5-bar solve_ik/map_angle_to_ax12 pair from mcu_ik_engine_wireless
 // verbatim (same mounts, same 818/441 calibration) so the math is proven, not
@@ -391,6 +428,153 @@ void initAX12Legs() {
     ax12WriteByte(id, 28, legServos[i].compSlope);    // CW  Compliance Slope
     ax12WriteByte(id, 29, legServos[i].compSlope);    // CCW Compliance Slope
     ax12WriteWord(id, 30, legServos[i].goalPos);      // Goal Position (standing pose)
+  }
+}
+
+// ── FORWARD KINEMATICS — for safe re-grip after limp ─────────────────────────
+// Exact inverse of map_angle_to_ax12(). Only needed when the operator has
+// moved the legs by hand (TQ0 limp -> reposition -> TQ1 re-grip). Without FK,
+// the first sync-write of the next move would jump back to the pre-limp pose.
+float ax12_to_angle(uint16_t pos, bool is_left, bool is_leg2) {
+  float base_angle = is_leg2 ? 90.0f : -90.0f;
+  float base_pos   = is_left ? 818.0f : 441.0f;
+  return base_angle + ((float)pos - base_pos) / 3.413f;
+}
+
+bool solve_fk(float aL_deg, float aR_deg, float leg_offset_x, Point2D &foot) {
+  Point2D sl = {SERVO_L_X + leg_offset_x, SERVO_L_Y};
+  Point2D sr = {SERVO_R_X + leg_offset_x, SERVO_R_Y};
+  Point2D kL = {sl.x + FEMUR_LEN * cosf(aL_deg * PI / 180.0f),
+                sl.y + FEMUR_LEN * sinf(aL_deg * PI / 180.0f)};
+  Point2D kR = {sr.x + FEMUR_LEN * cosf(aR_deg * PI / 180.0f),
+                sr.y + FEMUR_LEN * sinf(aR_deg * PI / 180.0f)};
+  Point2D f1, f2;
+  if (!circle_intersections(kL, TIBIA_LEN, kR, TIBIA_LEN, f1, f2)) return false;
+  foot = (f1.y < f2.y) ? f1 : f2;   // knee-up branch: the lower intersection
+  return true;
+}
+
+// ── SYNC_WRITE — all four goal positions in ONE 20-byte bus packet ────────────
+// THE FIX for the 80 ms intra-leg stagger: one broadcast hands every servo its
+// goal simultaneously. Being broadcast (ID 0xFE) there is no status reply —
+// only the half-duplex echo of our own bytes, drained here.
+void ax12SyncWriteGoals() {
+  uint8_t pkt[20];
+  pkt[0] = 0xFF; pkt[1] = 0xFF;
+  pkt[2] = 0xFE;                      // broadcast ID
+  pkt[3] = (2 + 1) * 4 + 4;          // LENGTH = (data_len+1)*n_servos + 4 = 16
+  pkt[4] = 0x83;                      // SYNC_WRITE opcode
+  pkt[5] = 30;                        // start address: Goal Position (RAM)
+  pkt[6] = 2;                         // bytes per servo
+  uint16_t sum = 0xFE + pkt[3] + 0x83 + 30 + 2;
+  uint8_t k = 7;
+  for (uint8_t i = 0; i < 4; i++) {
+    uint8_t id = legServos[i].id;
+    uint8_t lo = legServos[i].goalPos & 0xFF;
+    uint8_t hi = (legServos[i].goalPos >> 8) & 0xFF;
+    pkt[k++] = id; pkt[k++] = lo; pkt[k++] = hi;
+    sum += id + lo + hi;
+  }
+  pkt[k++] = ~(sum & 0xFF) & 0xFF;
+  Serial2.write(pkt, k);
+  Serial2.flush();
+  while (Serial2.available()) Serial2.read();   // drain our own half-duplex echo
+}
+
+// ── POSE TRAJECTORY HELPERS ──────────────────────────────────────────────────
+void computeDesiredFoot(float *fx, float *fy) {
+  if (poseMode == MODE_CROUCH) {
+    fx[0] = ik_fx1;  fy[0] = ik_fy1 + crouchOffset;
+    fx[1] = ik_fx2;  fy[1] = ik_fy2 + crouchOffset;
+  } else {
+    fx[0] = ft_x[0]; fy[0] = ft_y[0];
+    fx[1] = ft_x[1]; fy[1] = ft_y[1];
+  }
+}
+
+// Solve IK for both legs and cache counts into legServos[].goalPos.
+// Does NOT touch the bus — ax12SyncWriteGoals() does that atomically.
+void solveGoalsFor(const float *fx, const float *fy) {
+  IK_Result sol1 = solve_ik(fx[0], fy[0], 0.0f);
+  IK_Result sol2 = solve_ik(fx[1] + ik_dist, fy[1], ik_dist);
+  ikValid[0] = sol1.valid;
+  ikValid[1] = sol2.valid;
+  if (!sol1.valid || !sol2.valid) return;   // out of reach — hold last good pose
+
+  uint16_t p6  = map_angle_to_ax12(sol1.Angle_L, true,  false);
+  uint16_t p14 = map_angle_to_ax12(sol1.Angle_R, false, false);
+  float ikL2 = sol2.Angle_L, ikR2 = sol2.Angle_R;
+  if (LEG2_INVERTED_MOUNT) { ikL2 = -sol2.Angle_R; ikR2 = -sol2.Angle_L; }
+  uint16_t p0 = map_angle_to_ax12(ikL2, true,  true);
+  uint16_t p1 = map_angle_to_ax12(ikR2, false, true);
+
+  for (int i = 0; i < 4; i++) {
+    if      (legServos[i].id == 6)  legServos[i].goalPos = p6;
+    else if (legServos[i].id == 14) legServos[i].goalPos = p14;
+    else if (legServos[i].id == 0)  legServos[i].goalPos = p0;
+    else if (legServos[i].id == 1)  legServos[i].goalPos = p1;
+  }
+}
+
+// Begin an interpolated move from current foot to new target. Safe to restart
+// mid-flight: always departs from cur_*, never from the stale old endpoint.
+void startPoseMove() {
+  computeDesiredFoot(mv_x1, mv_y1);
+  for (int i = 0; i < 2; i++) { mv_x0[i] = cur_x[i]; mv_y0[i] = cur_y[i]; }
+  moveStartMs = millis();
+  moveActive  = true;
+}
+
+// Snap to target immediately — no interpolation. Used at boot and on SR.
+void snapPose() {
+  computeDesiredFoot(cur_x, cur_y);
+  solveGoalsFor(cur_x, cur_y);
+  moveActive = false;
+}
+
+// 100 Hz interpolation tick: advance the foot along a smoothstep curve and
+// broadcast the new IK solution to all four servos simultaneously.
+void updateMoveTask() {
+  if (!moveActive) return;
+  unsigned long elapsed = millis() - moveStartMs;
+  float f = (moveTimeMs == 0) ? 1.0f : (float)elapsed / (float)moveTimeMs;
+  if (f >= 1.0f) { f = 1.0f; moveActive = false; }
+
+  // Smoothstep: starts/ends at zero velocity so legs never snap into or slam
+  // out of motion even at full torque. For a linear ramp use f directly.
+  float s = f * f * (3.0f - 2.0f * f);
+
+  for (int i = 0; i < 2; i++) {
+    cur_x[i] = mv_x0[i] + (mv_x1[i] - mv_x0[i]) * s;
+    cur_y[i] = mv_y0[i] + (mv_y1[i] - mv_y0[i]) * s;
+  }
+  solveGoalsFor(cur_x, cur_y);
+  ax12SyncWriteGoals();
+}
+
+// ── SETTINGS PUSH — one servo per tick, never batched ─────────────────────────
+// Applies g_torqueLimit/compMargin/compSlope/movingSpeed/torqueOn to one servo
+// per tick (identified by settingsDirtyMask). 7 register writes ≈ 630 µs — a
+// quarter of the tick — which is why they are spread rather than sent all at once.
+void applyServoSettings(uint8_t idx) {
+  uint8_t id = legServos[idx].id;
+  ax12WriteWord(id, 34, g_torqueLimit);       // Torque Limit          (RAM)
+  ax12WriteByte(id, 26, g_compMargin);        // CW  Compliance Margin (RAM)
+  ax12WriteByte(id, 27, g_compMargin);        // CCW Compliance Margin (RAM)
+  ax12WriteByte(id, 28, g_compSlope);         // CW  Compliance Slope  (RAM)
+  ax12WriteByte(id, 29, g_compSlope);         // CCW Compliance Slope  (RAM)
+  ax12WriteWord(id, 32, g_movingSpeed);       // Moving Speed          (RAM)
+  ax12WriteByte(id, 24, g_torqueOn ? 1 : 0);  // Torque Enable         (RAM)
+}
+
+void applySettingsTask() {
+  if (settingsDirtyMask == 0) return;
+  for (uint8_t i = 0; i < 4; i++) {
+    if (settingsDirtyMask & (1 << i)) {
+      applyServoSettings(i);
+      settingsDirtyMask &= ~(1 << i);
+      return;                    // exactly one servo per tick
+    }
   }
 }
 
@@ -541,9 +725,149 @@ void parseCommand(char *cmd) {
     return;
   }
 
+  // ── NEW TWO-CHAR COMMANDS (ax12_control ported) — must precede single-char ──
+  // All TQ/TL/CM/CS/MS/MT/FT/FA/HM/SR/MD/RB checked here so they can never
+  // collide with the single-letter TE/TG/TC/T/C/M/R/S/P cases below.
+
+  // TQ0 / TQ1 — limp / re-grip
+  // Re-gripping seeds goalPos and cur_* from the last-read presentPos so the
+  // legs move smoothly from wherever the operator's hands left them.
+  if (cmd[0]=='T' && cmd[1]=='Q') {
+    bool want = (cmd[2] == '1');
+    if (want && !g_torqueOn) {
+      // Re-seed goalPos from last health poll present positions
+      for (int i = 0; i < 4; i++) legServos[i].goalPos = legServos[i].torqueLimit;
+      // --- FK re-seed of cur_* so the first move departs from the right foot ---
+      uint16_t p6=818, p14=441, p0=818, p1=441;
+      for (int i = 0; i < 4; i++) {
+        if      (legServos[i].id == 6)  p6  = legServos[i].goalPos;
+        else if (legServos[i].id == 14) p14 = legServos[i].goalPos;
+        else if (legServos[i].id == 0)  p0  = legServos[i].goalPos;
+        else if (legServos[i].id == 1)  p1  = legServos[i].goalPos;
+      }
+      Point2D f;
+      if (solve_fk(ax12_to_angle(p6,  true,  false),
+                   ax12_to_angle(p14, false, false), 0.0f, f)) {
+        cur_x[0] = f.x; cur_y[0] = f.y;
+      }
+      float ikL2 = ax12_to_angle(p0, true,  true);
+      float ikR2 = ax12_to_angle(p1, false, true);
+      float aL2 = ikL2, aR2 = ikR2;
+      if (LEG2_INVERTED_MOUNT) { aL2 = -ikR2; aR2 = -ikL2; }
+      if (solve_fk(aL2, aR2, ik_dist, f)) {
+        cur_x[1] = f.x - ik_dist; cur_y[1] = f.y;
+      }
+      moveActive = false;
+    }
+    g_torqueOn = want;
+    markAllSettingsDirty();
+    snprintf(ack, sizeof(ack), "ACK:TORQUE_%s", g_torqueOn ? "ON" : "LIMP");
+    Serial3.println(ack);
+    return;
+  }
+
+  // TL<n> — torque limit 0-1023
+  else if (cmd[0]=='T' && cmd[1]=='L') {
+    g_torqueLimit = (uint16_t)constrain(atoi(cmd + 2), 0, 1023);
+    markAllSettingsDirty();
+  }
+  // CM<n> — compliance margin 0-254
+  else if (cmd[0]=='C' && cmd[1]=='M') {
+    g_compMargin = (uint8_t)constrain(atoi(cmd + 2), 0, 254);
+    markAllSettingsDirty();
+  }
+  // CS<n> — compliance slope 0-254
+  else if (cmd[0]=='C' && cmd[1]=='S') {
+    g_compSlope = (uint8_t)constrain(atoi(cmd + 2), 0, 254);
+    markAllSettingsDirty();
+  }
+  // MS<n> — moving speed 0-1023 (0 = uncapped)
+  else if (cmd[0]=='M' && cmd[1]=='S') {
+    g_movingSpeed = (uint16_t)constrain(atoi(cmd + 2), 0, 1023);
+    markAllSettingsDirty();
+  }
+  // MT<n> — move time ms 100-3000
+  else if (cmd[0]=='M' && cmd[1]=='T') {
+    moveTimeMs = (uint16_t)constrain(atoi(cmd + 2), 100, 3000);
+  }
+  // FT<leg> <x> <y> — IK foot target for leg 1 or 2 (mm)
+  else if (cmd[0]=='F' && cmd[1]=='T') {
+    int leg = atoi(cmd + 2);
+    char *s1 = strchr(cmd + 2, ' ');
+    char *s2 = s1 ? strchr(s1 + 1, ' ') : NULL;
+    if (s1 && s2 && (leg == 1 || leg == 2)) {
+      ft_x[leg-1] = atof(s1 + 1);
+      ft_y[leg-1] = atof(s2 + 1);
+      if (poseMode == MODE_IK) startPoseMove();
+    } else {
+      Serial3.println("FT:ERR BAD_FORMAT");
+      return;
+    }
+  }
+  // FA <x1> <y1> <x2> <y2> — BOTH legs atomically (avoids 2-FT stagger)
+  else if (cmd[0]=='F' && cmd[1]=='A') {
+    char *a = strchr(cmd + 2, ' ');
+    char *b = a ? strchr(a + 1, ' ') : NULL;
+    char *c = b ? strchr(b + 1, ' ') : NULL;
+    char *d = c ? strchr(c + 1, ' ') : NULL;
+    if (a && b && c && d) {
+      ft_x[0]=atof(a+1); ft_y[0]=atof(b+1);
+      ft_x[1]=atof(c+1); ft_y[1]=atof(d+1);
+      if (poseMode == MODE_IK) startPoseMove();
+    } else {
+      Serial3.println("FA:ERR BAD_FORMAT");
+      return;
+    }
+  }
+  // HM — home: standing pose in both modes
+  else if (cmd[0]=='H' && cmd[1]=='M') {
+    crouchOffset = 0.0f;
+    ft_x[0]=ik_fx1; ft_y[0]=ik_fy1;
+    ft_x[1]=ik_fx2; ft_y[1]=ik_fy2;
+    startPoseMove();
+  }
+  // SR — servo reset (re-init bus registers)
+  else if (cmd[0]=='S' && cmd[1]=='R') {
+    initAX12Legs();
+    snapPose();
+    Serial3.println("ACK:SERVOS_RESET");
+    return;
+  }
+  // MD0 / MD1 — pose mode: 0=CROUCH, 1=IK
+  else if (cmd[0]=='M' && cmd[1]=='D') {
+    uint8_t want = (cmd[2] == '1') ? MODE_IK : MODE_CROUCH;
+    if (want != poseMode) {
+      if (want == MODE_IK) {
+        ft_x[0]=ik_fx1; ft_y[0]=ik_fy1+crouchOffset;
+        ft_x[1]=ik_fx2; ft_y[1]=ik_fy2+crouchOffset;
+      } else {
+        crouchOffset = 0.5f * ((ft_y[0]-ik_fy1) + (ft_y[1]-ik_fy2));
+      }
+    }
+    poseMode = want;
+    startPoseMove();
+  }
+  // RB — request state broadcast (GUI resync after connect)
+  else if (cmd[0]=='R' && cmd[1]=='B') {
+    // Build and send an AX12 state line immediately
+    char sl[192];
+    int n = snprintf(sl, sizeof(sl),
+      "AX12:MODE:%u,TQ:%u,TL:%u,CM:%u,CS:%u,MS:%u,MT:%u,CR:%.1f,"
+      "FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%u,IK2:%u,MOVE:%d\n",
+      (unsigned)poseMode,(unsigned)(g_torqueOn?1:0),
+      (unsigned)g_torqueLimit,(unsigned)g_compMargin,
+      (unsigned)g_compSlope,(unsigned)g_movingSpeed,
+      (unsigned)moveTimeMs, crouchOffset,
+      ft_x[0],ft_y[0],ft_x[1],ft_y[1],
+      (unsigned)(ikValid[0]?1:0),(unsigned)(ikValid[1]?1:0),(int)moveActive);
+    if (n > 0 && n < (int)sizeof(sl) && Serial3.availableForWrite() >= n)
+      Serial3.write((uint8_t*)sl, n);
+    return;
+  }
+
   // Auto-trim controls — multi-char, must be checked before the single-letter
   // 'T' (max safe tilt) case below or "TE1"/"TG.05" would parse as garbage tilt.
-  if (cmd[0]=='T' && cmd[1]=='E') {
+  else if (cmd[0]=='T' && cmd[1]=='E') {
     autoTrimEnabled = (cmd[2] == '1');
     if (!autoTrimEnabled) trim_bias = 0.0f;   // don't leave a half-converged bias live
     snprintf(ack, sizeof(ack), "ACK:AUTOTRIM_%s", autoTrimEnabled ? "ON" : "OFF");
@@ -681,6 +1005,11 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_R_A), countRight, RISING);
 
   setupMPU();
+  // Snap legs to standing pose and broadcast it via SYNC_WRITE before the
+  // balance loop starts. This means cur_* is valid from the very first tick.
+  snapPose();
+  ax12SyncWriteGoals();
+
   lastTime     = micros();
   lastPollTime = millis();
 
@@ -788,9 +1117,33 @@ void loop() {
   handleTelemetryRX();
   prof_stage[5] = (uint16_t)(micros() - prof_m); prof_m = micros();   // R
 
-  static bool isReadCycle = false;
-  isReadCycle = !isReadCycle;
-  if (isReadCycle) pollLegServosTask();
+  // ── SETTINGS PUSH (gated on POLL_IDLE to avoid collision with reply bytes) ──
+  if (pollState == POLL_IDLE) applySettingsTask();
+
+  // ── 3-MODE BUS ARBITRATION — exactly one Serial2 transaction per tick ────────
+  // Mode A: move active → SYNC_WRITE at full 100 Hz, health suspended.
+  // Mode B: idle, settings dirty → applySettingsTask() (already ran above).
+  // Mode C: idle, no settings → hold pose at 10 Hz + health poll at 50 Hz.
+  if (moveActive) {
+    // Abandon any in-flight health read so it does not collide with move writes.
+    if (pollState == POLL_WAITING) {
+      while (Serial2.available()) Serial2.read();
+      pollState    = POLL_IDLE;
+      lastPollTime = millis();
+    }
+    updateMoveTask();   // solveGoalsFor() + ax12SyncWriteGoals() inside
+  } else {
+    // Hold pose at 10 Hz — re-asserts goals to fight servo drift, but at a
+    // cadence slow enough that the health poll can run in the gaps.
+    static unsigned long lastHoldUs = 0;
+    if (g_torqueOn && pollState == POLL_IDLE && now - lastHoldUs >= 100000) {
+      lastHoldUs = now;
+      ax12SyncWriteGoals();
+    }
+    static bool isReadCycle = false;
+    isReadCycle = !isReadCycle;
+    if (isReadCycle) pollLegServosTask();
+  }
   prof_stage[6] = (uint16_t)(micros() - prof_m); prof_m = micros();   // V
 
   // ── TELEMETRY @ 10 Hz ────────────────────────────────────────────────────
@@ -802,33 +1155,48 @@ void loop() {
   if (now - lastPrintTime >= 100000) {
     lastPrintTime = now;
 
-    // Build the balance line into one buffer and hand it to the UART in a
-    // single guarded write. The old per-field Serial3.print() calls BLOCK once
-    // the radio backs up, stretching the 100 Hz loop's dt and delaying RX
-    // further — the ack path in parseCommand() already guards this way.
-    char line[192];
+    // ── Balance telemetry (10 Hz) ────────────────────────────────────────────
+    // Extended with leg subsystem state fields so the GUI can display both
+    // the balance loop AND the AX-12 trajectory/mode in one pass.
+    char line[256];
     int n = snprintf(line, sizeof(line),
       "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,"
-      "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d\n",
+      "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
+      "TORQ:%d,CR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d\n",
       pitch, output, integral, encL, encR, vel_current,
       (int)motorsEnabled, maxSafeTilt, trim_bias,
-      (int)autoTrimEnabled, (int)safetyLatched);
-
+      (int)autoTrimEnabled, (int)safetyLatched,
+      (int)g_torqueOn, crouchOffset,
+      cur_x[0], cur_y[0], cur_x[1], cur_y[1],
+      (int)ikValid[0], (int)ikValid[1], (int)moveActive);
     if (n > 0 && n < (int)sizeof(line) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)line, n);
 
-    // Servo health at 1 Hz (round-robin one servo per second) instead of one
-    // line per telemetry frame. Temperature and load are slow-moving; sending
-    // them 20x/s was pure air-time waste competing with the uplink.
+    // ── AX-12 state line (every 5 ticks = 500 ms) — compliance, speed, mode ─
+    // Emitted on alternating frames so it never competes with the PITCH line.
+    static uint8_t ax12StateDiv = 0;
+    if (++ax12StateDiv >= 5) {
+      ax12StateDiv = 0;
+      int m = snprintf(line, sizeof(line),
+        "AX12:MODE:%u,TQ:%u,TL:%u,CM:%u,CS:%u,MS:%u,MT:%u\n",
+        (unsigned)poseMode, (unsigned)(g_torqueOn?1:0),
+        (unsigned)g_torqueLimit, (unsigned)g_compMargin,
+        (unsigned)g_compSlope,  (unsigned)g_movingSpeed,
+        (unsigned)moveTimeMs);
+      if (m > 0 && m < (int)sizeof(line) && Serial3.availableForWrite() >= m)
+        Serial3.write((uint8_t*)line, m);
+    }
+
+    // ── Servo health at 1 Hz (round-robin one servo per second) ─────────────
     static uint8_t healthIdx   = 0;
     static unsigned long lastHealth = 0;
     if (now - lastHealth >= 1000000) {
       lastHealth = now;
       ServoState &h = legServos[healthIdx];
-      int m = snprintf(line, sizeof(line), "SRV:%u,%u,%.1f\n",
+      int k = snprintf(line, sizeof(line), "SRV:%u,%u,%.1f\n",
                        (unsigned)h.id, (unsigned)h.temp, h.loadPct);
-      if (m > 0 && m < (int)sizeof(line) && Serial3.availableForWrite() >= m)
-        Serial3.write((uint8_t*)line, m);
+      if (k > 0 && k < (int)sizeof(line) && Serial3.availableForWrite() >= k)
+        Serial3.write((uint8_t*)line, k);
       healthIdx = (healthIdx + 1) % 4;
     }
   }
