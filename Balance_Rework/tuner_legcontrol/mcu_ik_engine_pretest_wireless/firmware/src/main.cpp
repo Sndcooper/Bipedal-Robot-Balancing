@@ -39,8 +39,175 @@ void countRight() { if (digitalRead(ENC_R_B)) encoderRight--; else encoderRight+
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
+extern HardwareSerial Serial1;   // tick profiler out (PA9 TX) — OUTPUT ONLY
 extern HardwareSerial Serial2;   // AX-12 bus
 extern HardwareSerial Serial3;   // 3DR radio
+
+// ============================================================================
+// TICK PROFILER — how much of the 10 ms is consumed, and by what
+// ----------------------------------------------------------------------------
+// INSTRUMENTATION ONLY. Not one line of control logic below is altered by this
+// block: no stage is reordered, no timing is changed, nothing is optimised. The
+// numbers therefore describe the firmware you already trust, which is the whole
+// point of measuring it rather than rewriting it.
+//
+// Output is Serial1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
+// the 3DR radio. Sending profiling data over the link whose airtime starvation
+// you are trying to characterise would perturb the very thing being measured.
+//
+// TWO STREAMS
+//   1. one raw row per 100 Hz tick, so every stage's cost is visible per-tick
+//   2. a 1 Hz report: worst 5 ticks, best tick, mean, and modal bucket, ending
+//      in the WORST-CASE FREE microseconds — the honest budget for adding RC
+//
+// The report is ~11 lines but the UART TX ring is only 256 B, so it can never
+// be written in one tick. It is emitted ONE LINE PER TICK across the following
+// ticks instead, with the raw row suppressed while that runs (those ticks are
+// still counted in the statistics — only their printing is skipped). This is
+// why nothing here can ever block: every write is a single line, guarded.
+// ============================================================================
+#define PROF_STAGES 8
+// Column letters, in loop order. Keep in sync with PROF_KEYS below.
+//   I readIMU (I2C)   K calibrationTask   Y safety cutoff   E encoder->velocity
+//   C balance PID + setMotors             R telemetryRX+parse
+//   V pollLegServosTask (AX-12 bus)       T telemetry block
+static const char PROF_KEYS[PROF_STAGES + 1] = "IKYECRVT";
+
+uint16_t prof_stage[PROF_STAGES];       // this tick's per-stage microseconds
+
+// --- 1 s accumulators -------------------------------------------------------
+uint32_t prof_n       = 0;              // ticks this window
+uint32_t prof_sumBody = 0;
+uint16_t prof_best    = 0xFFFF;
+uint16_t prof_bestS[PROF_STAGES];
+uint16_t prof_worst [5];                // body us, sorted descending
+uint16_t prof_worstS[5][PROF_STAGES];
+uint16_t prof_ovr = 0, prof_rxTo = 0, prof_drop = 0;
+
+// Modal bucket: 100 us bins across 0..6.3 ms, last bin catches everything above.
+#define PROF_BINS 64
+uint16_t prof_hist[PROF_BINS];
+
+uint32_t prof_printUs = 0;              // previous tick's instrumentation cost
+int8_t   prof_report  = -1;             // >=0 while a report is being emitted
+
+// Snapshot the window so the report can be emitted over the following ticks
+// while a fresh window is already accumulating.
+uint32_t rep_n, rep_sum;
+uint16_t rep_best, rep_bestS[PROF_STAGES];
+uint16_t rep_worst[5], rep_worstS[5][PROF_STAGES];
+uint16_t rep_modeBin, rep_modeCount, rep_ovr, rep_rxTo, rep_drop;
+
+void profResetWindow() {
+  prof_n = 0; prof_sumBody = 0; prof_best = 0xFFFF;
+  for (int i = 0; i < 5; i++) prof_worst[i] = 0;
+  for (int i = 0; i < PROF_BINS; i++) prof_hist[i] = 0;
+  prof_ovr = 0; prof_rxTo = 0; prof_drop = 0;
+}
+
+void profAccumulate(uint16_t body) {
+  prof_n++;
+  prof_sumBody += body;
+  if (body > 10000 && prof_ovr < 0xFFFF) prof_ovr++;
+
+  uint16_t bin = body / 100;
+  if (bin >= PROF_BINS) bin = PROF_BINS - 1;
+  if (prof_hist[bin] < 0xFFFF) prof_hist[bin]++;
+
+  if (body < prof_best) {
+    prof_best = body;
+    for (int i = 0; i < PROF_STAGES; i++) prof_bestS[i] = prof_stage[i];
+  }
+  // Top-5 insertion sort, descending. Five compares worst case, ~1 us.
+  for (int i = 0; i < 5; i++) {
+    if (body > prof_worst[i]) {
+      for (int j = 4; j > i; j--) {
+        prof_worst[j] = prof_worst[j - 1];
+        for (int k = 0; k < PROF_STAGES; k++)
+          prof_worstS[j][k] = prof_worstS[j - 1][k];
+      }
+      prof_worst[i] = body;
+      for (int k = 0; k < PROF_STAGES; k++) prof_worstS[i][k] = prof_stage[k];
+      break;
+    }
+  }
+}
+
+void profSnapshotReport() {
+  rep_n   = prof_n ? prof_n : 1;
+  rep_sum = prof_sumBody;
+  rep_best = (prof_best == 0xFFFF) ? 0 : prof_best;
+  for (int i = 0; i < PROF_STAGES; i++) rep_bestS[i] = prof_bestS[i];
+  for (int i = 0; i < 5; i++) {
+    rep_worst[i] = prof_worst[i];
+    for (int k = 0; k < PROF_STAGES; k++) rep_worstS[i][k] = prof_worstS[i][k];
+  }
+  rep_modeBin = 0; rep_modeCount = 0;
+  for (int i = 0; i < PROF_BINS; i++)
+    if (prof_hist[i] > rep_modeCount) { rep_modeCount = prof_hist[i]; rep_modeBin = i; }
+  rep_ovr = prof_ovr; rep_rxTo = prof_rxTo; rep_drop = prof_drop;
+  prof_report = 0;
+  profResetWindow();
+}
+
+// Append " I1340 K0 Y0 ..." for one stage vector.
+int profStages(char *buf, int cap, const uint16_t *s) {
+  int n = 0;
+  for (int i = 0; i < PROF_STAGES && n < cap - 12; i++)
+    n += snprintf(buf + n, cap - n, " %c%u", PROF_KEYS[i], (unsigned)s[i]);
+  return n;
+}
+
+// One report line per call. Returns false when the report is finished.
+bool profReportLine(char *b, int cap) {
+  int n = 0;
+  uint32_t mean = rep_sum / rep_n;
+  switch (prof_report) {
+    case 0:
+      snprintf(b, cap, "=== BUDGET 1s: %lu ticks x 10000us ===",
+               (unsigned long)rep_n);
+      break;
+    case 1:
+      snprintf(b, cap, "  mean B%luus %lu.%lu%% free %luus",
+               (unsigned long)mean, (unsigned long)(mean / 100),
+               (unsigned long)((mean / 10) % 10), (unsigned long)(10000 - mean));
+      break;
+    case 2:
+      n = snprintf(b, cap, "  best B%uus free %uus",
+                   (unsigned)rep_best, (unsigned)(10000 - rep_best));
+      profStages(b + n, cap - n, rep_bestS);
+      break;
+    case 3:
+      snprintf(b, cap, "  mode B%u-%uus (%u of %lu ticks)",
+               (unsigned)(rep_modeBin * 100), (unsigned)(rep_modeBin * 100 + 99),
+               (unsigned)rep_modeCount, (unsigned long)rep_n);
+      break;
+    case 4: case 5: case 6: case 7: case 8: {
+      int i = prof_report - 4;
+      n = snprintf(b, cap, "  w%d B%uus %lu.%lu%%", i + 1, (unsigned)rep_worst[i],
+                   (unsigned long)(rep_worst[i] / 100),
+                   (unsigned long)((rep_worst[i] / 10) % 10));
+      profStages(b + n, cap - n, rep_worstS[i]);
+      break;
+    }
+    case 9:
+      // The number that answers "how much room is left for RC": not the mean,
+      // the WORST tick. A stage that fits on average but not on the worst tick
+      // is a stage that overruns the loop under load.
+      snprintf(b, cap, "  WORST-CASE FREE %uus (%lu.%lu%%) <- RC budget",
+               (unsigned)(10000 - rep_worst[0]),
+               (unsigned long)((10000 - rep_worst[0]) / 100),
+               (unsigned long)(((10000 - rep_worst[0]) / 10) % 10));
+      break;
+    case 10:
+      snprintf(b, cap, "  ovr %u  servo_timeout %u  rows_dropped %u",
+               (unsigned)rep_ovr, (unsigned)rep_rxTo, (unsigned)rep_drop);
+      break;
+    default:
+      return false;
+  }
+  return true;
+}
 
 // ── MPU6050 ───────────────────────────────────────────────────────────────────
 const int MPU_ADDR = 0x68;
@@ -499,6 +666,7 @@ void handleTelemetryRX() {
 void setup() {
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
+  Serial1.begin(115200);       // tick profiler out (PA9 = TX)
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 
@@ -517,6 +685,16 @@ void setup() {
   lastPollTime = millis();
 
   Serial3.println("BOOT:OK");
+
+  profResetWindow();
+  Serial1.println();
+  Serial1.println("# pretest_wireless tick profiler - 100 Hz, all us");
+  Serial1.println("#   P period(10000)  B body  F free  X profiler cost");
+  Serial1.println("#   I readIMU (I2C)        K calibrationTask");
+  Serial1.println("#   Y safety cutoff        E encoder->velocity");
+  Serial1.println("#   C balance PID+setMotors R telemetryRX+parse");
+  Serial1.println("#   V pollLegServosTask     T telemetry block");
+  Serial1.println("# 1 Hz report follows: worst 5 / best / mean / mode");
 }
 
 // ── MAIN LOOP (100 Hz) ────────────────────────────────────────────────────────
@@ -524,11 +702,17 @@ void loop() {
   unsigned long now = micros();
   if (now - lastTime < 10000) return;   // enforce 100 Hz
   float dt = (now - lastTime) * 1.0e-6f;
+  uint32_t prof_period = (uint32_t)(now - lastTime);
   lastTime = now;
+
+  uint32_t prof_t0 = micros();      // profiler: start of the loop body
+  uint32_t prof_m  = prof_t0;       // profiler: start of the current stage
 
   // ── IMU ────────────────────────────────────────────────────────────────
   readIMU(dt);
+  prof_stage[0] = (uint16_t)(micros() - prof_m); prof_m = micros();   // I
   calibrationTask();   // accumulates this tick's sample when a cal is running
+  prof_stage[1] = (uint16_t)(micros() - prof_m); prof_m = micros();   // K
 
   // ── SAFETY CUTOFF ───────────────────────────────────────────────────────
   if (fabsf(pitch) > maxSafeTilt && motorsEnabled) {
@@ -538,6 +722,7 @@ void loop() {
     setMotors(0, 0);
     Serial3.println("SAFETY:CUTOFF");
   }
+  prof_stage[2] = (uint16_t)(micros() - prof_m); prof_m = micros();   // Y
 
   // ── ENCODER → VELOCITY (telemetry display only) ─────────────────────────
   long encL = encoderLeft;
@@ -548,6 +733,7 @@ void loop() {
   vel_current = vel_alpha * vel_current + (1.0f - vel_alpha) * vel_raw;
   prevEncoderLeft  = encL;
   prevEncoderRight = encR;
+  prof_stage[3] = (uint16_t)(micros() - prof_m); prof_m = micros();   // E
 
   // Leg torque is intentionally independent of motorsEnabled (the drive-wheel
   // arm state): pollLegServosTask() below keeps torque enabled and re-asserts
@@ -592,16 +778,20 @@ void loop() {
     setMotors(pwm, pwm);                      // no steering — pure balance
   }
 
+  prof_stage[4] = (uint16_t)(micros() - prof_m); prof_m = micros();   // C
+
   // ── RX EVERY TICK, SERVO POLL AT 50 Hz ──────────────────────────────────
   // Uplink commands are latency-critical and the downlink was starving them,
   // so RX now runs on every 10 ms tick instead of every other one. The servo
   // health poll keeps its old 50 Hz slot — it is a slow, purely cosmetic read
   // and pollLegServosTask() already rate-limits itself to POLL_INTERVAL_MS.
   handleTelemetryRX();
+  prof_stage[5] = (uint16_t)(micros() - prof_m); prof_m = micros();   // R
 
   static bool isReadCycle = false;
   isReadCycle = !isReadCycle;
   if (isReadCycle) pollLegServosTask();
+  prof_stage[6] = (uint16_t)(micros() - prof_m); prof_m = micros();   // V
 
   // ── TELEMETRY @ 10 Hz ────────────────────────────────────────────────────
   // Halved from 20 Hz. The 3DR/SiK link is half-duplex with a TDM air protocol:
@@ -642,4 +832,52 @@ void loop() {
       healthIdx = (healthIdx + 1) % 4;
     }
   }
+  prof_stage[7] = (uint16_t)(micros() - prof_m);                       // T
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PROFILER EMIT — everything below is instrumentation, no control logic
+  // ══════════════════════════════════════════════════════════════════════════
+  // Body is sampled HERE, before anything below runs, so it excludes the
+  // profiler's own cost. That tax is reported separately as X (previous tick's,
+  // since this tick's is not knowable until after the write). Subtract X to get
+  // what the loop costs with profiling compiled out.
+  uint32_t prof_bodyU = micros() - prof_t0;
+  uint16_t prof_body  = (prof_bodyU > 65535) ? 65535 : (uint16_t)prof_bodyU;
+  profAccumulate(prof_body);
+
+  uint32_t prof_tp = micros();
+  {
+    char pb[128];
+    if (prof_report >= 0) {
+      // A 1 Hz report is in flight: one line per tick, raw row suppressed.
+      // Those ticks are still counted above — only their printing is skipped.
+      if (profReportLine(pb, sizeof(pb))) {
+        int n = (int)strlen(pb);
+        pb[n++] = '\n';
+        if (Serial1.availableForWrite() >= n) { Serial1.write((uint8_t*)pb, n); prof_report++; }
+      } else {
+        prof_report = -1;
+      }
+    } else {
+      int n = snprintf(pb, sizeof(pb), "P%lu B%u F%ld",
+                       (unsigned long)prof_period, (unsigned)prof_body,
+                       (long)(10000 - (int32_t)prof_body));
+      n += profStages(pb + n, (int)sizeof(pb) - n, prof_stage);
+      n += snprintf(pb + n, sizeof(pb) - n, " X%lu%s\n",
+                    (unsigned long)prof_printUs,
+                    (prof_body > 10000) ? " !OVR" : "");
+      if (n > 0 && n < (int)sizeof(pb) && Serial1.availableForWrite() >= n)
+        Serial1.write((uint8_t*)pb, n);
+      else if (prof_drop < 0xFFFF) prof_drop++;
+    }
+
+    // Roll the window once a second. Snapshot first so the report can be
+    // emitted over the following ticks while a fresh window accumulates.
+    static unsigned long profLastReport = 0;
+    if (prof_report < 0 && now - profLastReport >= 1000000) {
+      profLastReport = now;
+      profSnapshotReport();
+    }
+  }
+  prof_printUs = micros() - prof_tp;
 }

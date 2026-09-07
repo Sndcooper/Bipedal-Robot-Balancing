@@ -96,3 +96,105 @@ python gui/main_gui.py                # connect to the 3DR COM port @ 115200
 **First-run:** with motors OFF, hand-tilt the robot and confirm `Angle` moves the
 right way and settles; if it inverts/runs away, flip `GYRO_PITCH_SIGN` in
 `main.cpp`. Tune on a harness before free-standing.
+
+---
+
+## Tick profiler (Serial1 → COM3)
+
+**Instrumentation only.** Not one line of control logic was altered to add this:
+no stage reordered, no timing changed, nothing optimised. Verified by stripping
+every profiler line from the file and diffing the remainder against the previous
+version — zero residual code differences. The numbers therefore describe the
+firmware you already trust, which is the whole point of measuring it rather than
+rewriting it.
+
+Output goes to `Serial1` (**PA9 = TX**, 115200) — a plain wired UART, *not* the
+3DR radio. Sending profiling data over the link whose airtime starvation you are
+characterising would perturb the very thing being measured. Wire PA9 to a
+USB-TTL RX and share ground; PA10 is unused, so the port is output-only and a
+stray terminal keystroke can never reach the balancer.
+
+### Stream 1 — one raw row per 100 Hz tick
+
+```
+P10001 B1603 F8397 I1340 K0 Y1 E14 C38 R210 V0   T0  X44
+P10001 B2023 F7977 I1345 K0 Y1 E14 C38 R205 V420 T0  X44
+P11740 B3106 F6894 I1341 K0 Y1 E14 C38 R1712 V0  T0  X44 !OVR
+```
+
+| Col | Stage |
+| --- | --- |
+| `P` | tick period — the 100 Hz check, target 10000 |
+| `B` | loop body total — **budget consumed** |
+| `F` | free left of the 10000 |
+| `I` | `readIMU` (I2C) |
+| `K` | `calibrationTask` |
+| `Y` | safety cutoff block |
+| `E` | encoder → velocity |
+| `C` | balance PID + `setMotors` |
+| `R` | `handleTelemetryRX` + `parseCommand` |
+| `V` | `pollLegServosTask` (AX-12 bus) |
+| `T` | telemetry block |
+| `X` | profiler's own cost, previous tick |
+
+`B` is sampled *before* the row is composed, so it excludes the instrumentation;
+the tax is reported separately as `X`.
+
+### Stream 2 — the 1 Hz budget report
+
+```
+=== BUDGET 1s: 100 ticks x 10000us ===
+  mean B1698us 16.9% free 8302us
+  best B1603us free 8397us I1340 K0 Y1 E14 C38 R210 V0 T0
+  mode B1600-1699us (71 of 100 ticks)
+  w1 B3105us 31.0% I1341 K0 Y1 E14 C38 R1712 V0 T0
+  w2 B1818us 18.1% I1345 K0 Y1 E14 C38 R205 V420 T0
+  w3 B1495us 14.9% I1338 K0 Y1 E14 C39 R208 V0 T95
+  w4 B1493us 14.9% ...
+  w5 B1491us 14.9% ...
+  WORST-CASE FREE 6895us (68.9%) <- RC budget
+  ovr 0  servo_timeout 0  rows_dropped 0
+```
+
+Worst 5 ticks (with full stage breakdown, so you can see *what* made them worst),
+best tick, mean, and modal 100 µs bucket.
+
+**Use `WORST-CASE FREE`, not the mean, as the RC budget.** A stage that fits on
+average but not on the worst tick is a stage that overruns the loop under load —
+and that is exactly when a balancer must not stall.
+
+### Why it cannot stall the loop it measures
+
+The report is 11 lines but the UART TX ring is 256 B, so it can never be written
+in one tick. It is emitted **one line per tick** across the following 11 ticks
+(110 ms of every second), with the raw row suppressed while that runs — those
+ticks are still counted in the statistics, only their printing is skipped. Every
+write is a single guarded line. At ~56 B/row the raw stream is ~5.6 kB/s, 49% of
+the port; the ring drains 115 B per tick and we add 56, so it stays near empty.
+
+### Reading it
+
+The firmware computes its own report, so a plain serial terminal on COM3 is
+enough. For CSV logging or your own aggregation:
+
+```
+python prof_capture.py COM3                    # ranks stages by mean cost
+python prof_capture.py COM3 --csv run.csv      # log every row
+```
+
+> Its column letters belong to **this variant only**. `ax12_control` emits a
+> different set (`P B F R S U T L X`) for a different loop; pointing one
+> variant's capture script at the other's port silently misreads the columns.
+
+### What to look at first
+
+`I` (`readIMU`) is expected to dominate: `Wire.setClock()` is never called, so
+I2C runs at the STM32duino default of **100 kHz**, and the 15-byte transaction
+costs roughly **1.3–1.5 ms — 13–15% of every single tick.** A single
+`Wire.setClock(400000)` in `setupMPU()` would cut that ~4×, freeing ~1 ms per
+tick. That change is *not* applied here — this pass is instrumentation only, so
+measure it on your hardware first and decide with real numbers.
+
+Spikes in `R` are the unguarded `Serial3.println()` acks in `parseCommand()`
+blocking at ~87 µs/byte when the radio backs up (`ax12_control` guards these;
+this firmware deliberately still does not).
