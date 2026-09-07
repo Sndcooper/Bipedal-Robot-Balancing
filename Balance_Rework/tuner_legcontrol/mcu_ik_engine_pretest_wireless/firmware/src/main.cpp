@@ -249,11 +249,24 @@ unsigned long lastTime      = 0;
 unsigned long lastPrintTime = 0;
 
 // ── AX-12 HELPERS ─────────────────────────────────────────────────────────────
+// Shared by every write/read path below — one place to discard whatever our own
+// half-duplex echo (or a timed-out reply) left sitting in Serial2's RX buffer.
+void ax12DrainRx() { while (Serial2.available()) Serial2.read(); }
+
+// Status Return Level is set to 1 (reply to READ only) in initAX12Legs(), so a
+// WRITE never gets a status packet back — only the half-duplex echo of the
+// bytes we just sent. Draining it HERE, once, means every caller (initAX12Legs,
+// applyServoSettings, ...) automatically leaves Serial2's RX buffer clean for
+// whatever runs next in the tick, instead of each call site having to remember
+// to do it (applyServoSettings() didn't, which desynced pollLegServosTask()'s
+// byte-counted READ parser whenever a settings push and a health poll landed
+// in the same or adjacent ticks).
 void ax12WriteByte(uint8_t id, uint8_t addr, uint8_t val) {
   uint8_t checksum = ~(id + 4 + 3 + addr + val) & 0xFF;
   uint8_t packet[] = {0xFF, 0xFF, id, 0x04, 0x03, addr, val, checksum};
   Serial2.write(packet, 8);
-  Serial2.flush(); // half-duplex: drain before the bus can switch direction
+  Serial2.flush();       // TX drained: bus can turn around
+  ax12DrainRx();          // RX drained: our own echo, discarded
 }
 
 void ax12WriteWord(uint8_t id, uint8_t addr, uint16_t val) {
@@ -263,6 +276,7 @@ void ax12WriteWord(uint8_t id, uint8_t addr, uint16_t val) {
   uint8_t packet[] = {0xFF, 0xFF, id, 0x05, 0x03, addr, lo, hi, checksum};
   Serial2.write(packet, 9);
   Serial2.flush();
+  ax12DrainRx();
 }
 
 // ── LEG SERVO STATE (held pose + health only, no IK) ─────────────────────────
@@ -391,31 +405,6 @@ uint16_t map_angle_to_ax12(float ik_angle, bool is_left, bool is_leg2) {
   return (uint16_t)constrain((int)ax_pos, 0, 1023);
 }
 
-// Recomputes goalPos for all 4 legs at the current crouchOffset and caches it
-// into legServos[]; pollLegServosTask() (20ms/servo) re-asserts it to hardware
-// on its normal cadence — no need to touch the 100 Hz hot path for this.
-void updateLegPose() {
-  float footY1 = ik_fy1 + crouchOffset;
-  float footY2 = ik_fy2 + crouchOffset;
-  IK_Result sol1 = solve_ik(ik_fx1, footY1, 0.0f);
-  IK_Result sol2 = solve_ik(ik_fx2 + ik_dist, footY2, ik_dist);
-  if (!sol1.valid || !sol2.valid) return;   // out of reach — leave last good pose
-
-  uint16_t p6  = map_angle_to_ax12(sol1.Angle_L, true,  false);
-  uint16_t p14 = map_angle_to_ax12(sol1.Angle_R, false, false);
-  float ikL2 = sol2.Angle_L, ikR2 = sol2.Angle_R;
-  if (LEG2_INVERTED_MOUNT) { ikL2 = -sol2.Angle_R; ikR2 = -sol2.Angle_L; }
-  uint16_t p0 = map_angle_to_ax12(ikL2, true,  true);
-  uint16_t p1 = map_angle_to_ax12(ikR2, false, true);
-
-  for (int i = 0; i < 4; i++) {
-    if      (legServos[i].id == 6)  legServos[i].goalPos = p6;
-    else if (legServos[i].id == 14) legServos[i].goalPos = p14;
-    else if (legServos[i].id == 0)  legServos[i].goalPos = p0;
-    else if (legServos[i].id == 1)  legServos[i].goalPos = p1;
-  }
-}
-
 void initAX12Legs() {
   for (int i = 0; i < 4; i++) {
     uint8_t id = legServos[i].id;
@@ -429,6 +418,34 @@ void initAX12Legs() {
     ax12WriteByte(id, 29, legServos[i].compSlope);    // CCW Compliance Slope
     ax12WriteWord(id, 30, legServos[i].goalPos);      // Goal Position (standing pose)
   }
+}
+
+// ── PRESENT POSITION READ (blocking) — TQ1 re-grip only, never the hot path ──
+// Reads addr 36 len 2 (Present Position). Blocking is fine here: this runs
+// synchronously in response to one deliberate operator command (TQ1), not on
+// every 100 Hz tick like pollLegServosTask() — a 20 ms/servo worst case is
+// nothing next to the human reaction time behind the command that triggered it.
+bool ax12ReadPresentPos(uint8_t id, uint16_t &posOut) {
+  // No pre-clear needed: ax12WriteByte/Word now drain their own echo (see
+  // above), so Serial2's RX buffer is already quiet by the time this runs.
+  uint8_t checksum = ~(id + 4 + 2 + 36 + 2) & 0xFF;
+  uint8_t packet[] = {0xFF, 0xFF, id, 0x04, 0x02, 36, 2, checksum};
+  Serial2.write(packet, 8);
+  Serial2.flush();
+
+  unsigned long start = millis();                // 8-byte echo + 8-byte reply
+  while (Serial2.available() < 16) {
+    if (millis() - start >= 20) {                 // servo silent — give up
+      ax12DrainRx();                              // caller keeps last goalPos
+      return false;
+    }
+  }
+
+  uint8_t buf[16];
+  for (uint8_t i = 0; i < 16; i++) buf[i] = Serial2.read();
+  if (buf[8] != 0xFF || buf[9] != 0xFF || buf[10] != id) return false;
+  posOut = buf[13] | ((uint16_t)buf[14] << 8);
+  return true;
 }
 
 // ── FORWARD KINEMATICS — for safe re-grip after limp ─────────────────────────
@@ -478,7 +495,7 @@ void ax12SyncWriteGoals() {
   pkt[k++] = ~(sum & 0xFF) & 0xFF;
   Serial2.write(pkt, k);
   Serial2.flush();
-  while (Serial2.available()) Serial2.read();   // drain our own half-duplex echo
+  ax12DrainRx();                                 // drain our own half-duplex echo
 }
 
 // ── POSE TRAJECTORY HELPERS ──────────────────────────────────────────────────
@@ -606,6 +623,12 @@ void pollLegServosTask() {
 
 
 
+    // Every write path already drains its own echo (see ax12DrainRx()), so
+    // this is normally a no-op — but it's cheap insurance against a stray
+    // byte from EMI/noise on the bus landing here and shifting the fixed
+    // 8-echo/10-reply byte count this state machine relies on below.
+    ax12DrainRx();
+
     // READ addr 40 len 4 → Load(2B) Volt(1B) Temp(1B)
     uint8_t checksum = ~(s.id + 4 + 2 + 40 + 4) & 0xFF;
     uint8_t packet[] = {0xFF, 0xFF, s.id, 0x04, 0x02, 40, 4, checksum};
@@ -632,7 +655,7 @@ void pollLegServosTask() {
       pollState       = POLL_IDLE;
     }
     else if (now - waitStartTime > 20) {          // timeout — servo silent
-      while (Serial2.available()) Serial2.read();
+      ax12DrainRx();
       currentServoIdx = (currentServoIdx + 1) % 4;
       lastPollTime    = millis();
       pollState       = POLL_IDLE;
@@ -741,8 +764,16 @@ void parseCommand(char *cmd) {
   if (cmd[0]=='T' && cmd[1]=='Q') {
     bool want = (cmd[2] == '1');
     if (want && !g_torqueOn) {
-      // Re-seed goalPos from last health poll present positions
-      for (int i = 0; i < 4; i++) legServos[i].goalPos = legServos[i].torqueLimit;
+      // Re-seed goalPos from a live present-position read of each servo.
+      // (Was `legServos[i].goalPos = legServos[i].torqueLimit` — copied the
+      // torque-limit register, ~1023, into the goal position, which slammed
+      // every leg toward its travel limit on every re-grip.)
+      for (int i = 0; i < 4; i++) {
+        uint16_t pos;
+        if (ax12ReadPresentPos(legServos[i].id, pos)) legServos[i].goalPos = pos;
+        // else: servo didn't answer in time — keep the last known goalPos
+        // rather than guess.
+      }
       // --- FK re-seed of cur_* so the first move departs from the right foot ---
       uint16_t p6=818, p14=441, p0=818, p1=441;
       for (int i = 0; i < 4; i++) {
@@ -932,7 +963,12 @@ void parseCommand(char *cmd) {
     // Crouch bar — checked before the bare 'C' (calibrate) case, or "CR40"
     // would trigger an IMU calibration instead of setting crouch depth.
     crouchOffset = atof(cmd + 2);
-    updateLegPose();   // legs move (and hold, torque-independent of motorsEnabled)
+    // legs move (and hold, torque-independent of motorsEnabled) — same solver
+    // solveGoalsFor() uses for FT/FA/HM moves, just applied immediately instead
+    // of through the interpolated trajectory engine.
+    float fx[2] = {ik_fx1, ik_fx2};
+    float fy[2] = {ik_fy1 + crouchOffset, ik_fy2 + crouchOffset};
+    solveGoalsFor(fx, fy);
   }
   else if (cmd[0] == 'C') { startCalibration(); return; }
   else if (cmd[0] == 'R') {
@@ -1127,7 +1163,7 @@ void loop() {
   if (moveActive) {
     // Abandon any in-flight health read so it does not collide with move writes.
     if (pollState == POLL_WAITING) {
-      while (Serial2.available()) Serial2.read();
+      ax12DrainRx();
       pollState    = POLL_IDLE;
       lastPollTime = millis();
     }
