@@ -36,11 +36,12 @@ compliance and torque all day without a single line of balance code executing.
 
 Identical to the balancing variants — flash either firmware onto the same board.
 
-| Function       | Port            | Pins        | Baud      |
-| -------------- | --------------- | ----------- | --------- |
-| 3DR telemetry  | `Serial3`       | PB10 / PB11 | 115200    |
-| AX-12+ bus     | `Serial2`       | PA2 / PA3   | 1 000 000 |
-| Drive motors   | *forced LOW*    | —           | —         |
+| Function          | Port         | Pins        | Baud      |
+| ----------------- | ------------ | ----------- | --------- |
+| 3DR telemetry     | `Serial3`    | PB10 / PB11 | 115200    |
+| AX-12+ bus        | `Serial2`    | PA2 / PA3   | 1 000 000 |
+| Tick profiler out | `Serial1`    | PA9 (TX)    | 115200    |
+| Drive motors      | *forced LOW* | —           | —         |
 
 The L298N pins (`PA0 PA1 PB12-PB15`) are set OUTPUT and driven LOW in `setup()`
 and never touched again. A floating enable on a powered L298N can latch a wheel
@@ -187,10 +188,106 @@ It asks for confirmation first, because **the robot will collapse if unsupported
 > with your hands still in the linkage. After re-gripping, command a pose
 > deliberately.
 
+**Link status** (`link: ok` / `link: STALE 12s` / `link: no reply`) sits in the
+header, and it gates every slider. This exists because of a specific failure:
+sliders would snap back to a value nobody set.
+
+The GUI seeds its firmware mirror with the firmware's power-on defaults so the
+linkage plot renders before the first `STATE:` line arrives. Those seeds are a
+**guess, not a report** — but `_poll()` used to sync sliders from that same dict,
+so a value the GUI invented was treated as firmware truth. The self-healing echo
+deadline (2 s, there because acks do get dropped on this radio) then did its job
+correctly into a lie: it stopped waiting, read `compSlope` = the seeded `4`, and
+yanked the slider there. With nothing connected, *every* slider reverted to its
+seed two seconds after you moved it.
+
+So sliders now sync **only from a fresh, real** `STATE:` line — never from the
+seeds, and never from a mirror frozen by a dead link (`STATE_STALE_S`, 3 s = three
+missed keepalives).
+
+The second half: on a missed ack the GUI **cannot tell a lost command from a lost
+ack**, and guessing wrong silently discards what you set. So the first timeout
+re-asks the firmware (`RB`) and waits one more window instead of surrendering. If
+the reply still says the old value the command really was lost and reverting is
+correct and informative; if it says the new one, only the ack was lost and
+nothing moves.
+
+> If a slider reverts while the header says `link: ok`, that is now meaningful:
+> the firmware was asked twice and really does hold the old value. Check that the
+> command is not being truncated — see the RX-buffer note below.
+
 **Profiles** save and load the full knob set plus the pose to
 `gui/profiles/ax12_<timestamp>.json`. Loading updates every widget locally first
 and *then* pushes in one burst, so the pushes do not interleave with the sliders'
 echo guards.
+
+---
+
+## Tick profiler (Serial1 → COM3)
+
+The loop runs at 100 Hz — a 10 ms budget per tick. The profiler answers the only
+question that matters about that: **how much of the 10 ms is actually being
+consumed, and by what.**
+
+Every tick emits one raw row on `Serial1` (PA9 = TX, 115200). Wire PA9 to a
+USB-TTL RX and share ground; PA10 is unused and the port is **output only**, so
+a stray keystroke in a terminal can never command the robot.
+
+```
+# ax12_control tick profiler - one row per 100 Hz tick, all us
+P10001 B41   F9959 R8    S0   U0   T0  L0   X31
+P10000 B243  F9757 R7    S0   U201 T0  L0   X31
+P10002 B692  F9308 R6    S631 U21  T0  L0   X32
+P10001 B118  F9882 R5    S0   U62  T0  L512 X31
+P11740 B1798 F8202 R1712 S0   U61  T0  L0   X31 !OVR
+```
+
+| Col | Meaning |
+| --- | --- |
+| `P` | tick period — **this is the 100 Hz check**, target 10000 |
+| `B` | loop body total — **the budget actually consumed** |
+| `F` | free time left of the 10000 |
+| `R` | `handleTelemetryRX` + `parseCommand` (and its acks) |
+| `S` | `applySettingsTask` — servo register writes |
+| `U` | all AX-12 bus traffic: sync-write, poll TX and reply |
+| `T` | telemetry build + write on Serial3 |
+| `L` | servo read latency, request → reply (0 if none completed) |
+| `X` | the profiler's own cost, previous tick |
+| `!OVR` | body exceeded 10000 µs |
+| `!ERR` | a servo read timed out, or a profiler row was dropped |
+
+**Why the columns are honest.** `B` is sampled *before* the row is composed or
+written, so it excludes the instrumentation; the tax is reported separately as
+`X`. `L` spans two ticks by nature (request in one, reply in the next) so it is
+deliberately *not* part of any single tick's `B` — it measures the servo's own
+turnaround, not CPU time.
+
+**It cannot stall what it measures.** The write is guarded by
+`availableForWrite() >= n`, the same as the radio path. At ~39 B/row × 100 Hz
+that is ~3.9 kB/s, 34% of the port; the TX ring drains 115 B per tick and we add
+39, so it sits near empty and the guard effectively never has to drop a row.
+
+At 100 rows/s the raw stream is unreadable live, so:
+
+```
+python prof_capture.py COM3               # one summary per second
+python prof_capture.py COM3 --csv run.csv # also log every row
+python prof_capture.py COM3 --raw         # firehose
+```
+
+which prints min/avg/p99/max per column, ticks-per-second (should be 100), and
+`B` as a percentage of budget.
+
+### The blocking acks, found by writing this
+
+Seven `Serial3.println()` calls in `parseCommand()` were **unguarded**, unlike
+the telemetry path. `println` blocks once the radio's TX ring backs up, at
+~87 µs/byte — a 20-byte ack stalls the loop **1.7 ms**, a sixth of the tick. That
+is the `R1712 … !OVR` row above. They now go through `radioLine()`, which uses
+the same guarded single write. The tradeoff is that an ack can be *dropped* under
+congestion instead of delaying the loop; that is safe here because the GUI's
+slider guard re-requests state (`RB`) when an ack goes missing, so it costs a
+round trip rather than correctness.
 
 ---
 

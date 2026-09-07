@@ -97,6 +97,7 @@
                 "STM32F1",
                 "STM32F103xB",
                 "HAL_UART_MODULE_ENABLED",
+                "ENABLE_HWSERIAL1",
                 "ENABLE_HWSERIAL2",
                 "ENABLE_HWSERIAL3",
                 "SERIAL_TX_BUFFER_SIZE=256",

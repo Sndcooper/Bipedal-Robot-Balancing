@@ -43,12 +43,53 @@
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
+extern HardwareSerial Serial1;   // wired profiling port (PA9/PA10) — OUTPUT ONLY
 extern HardwareSerial Serial2;   // AX-12 bus
 extern HardwareSerial Serial3;   // 3DR radio
 
 // ── LOOP TIMING ──────────────────────────────────────────────────────────────
 unsigned long lastTime      = 0;
 unsigned long lastPrintTime = 0;
+const unsigned long TICK_US = 10000;   // 100 Hz
+
+// ── GUARDED RADIO LINE ───────────────────────────────────────────────────────
+// NEVER call Serial3.print/println from the 100 Hz path. println BLOCKS once
+// the radio's TX ring backs up, at ~87 us per byte at 115200 — a 20-byte ack
+// stalls the loop for 1.7 ms, a sixth of the whole tick, and the profiler will
+// show it as a body-time spike with no work to account for it. This drops the
+// line instead of waiting. A dropped ack is cheap: the GUI's slider guard
+// re-requests state (RB) when an ack goes missing, so it costs a round trip,
+// not correctness. The telemetry path has always guarded this way; these ack
+// sites simply never did.
+void radioLine(const char *s) {
+  int n = (int)strlen(s);
+  if (n <= 0 || n > 190) return;
+  char buf[192];
+  memcpy(buf, s, (size_t)n);
+  buf[n++] = '\n';
+  if (Serial3.availableForWrite() >= n) Serial3.write((uint8_t *)buf, n);
+}
+
+// ── PROFILING — one raw sample per tick, out on Serial1 ──────────────────────
+// The question this answers: how much of the 10 ms is actually being consumed,
+// and by what. Every segment of the loop body is timed separately with micros()
+// and emitted every single tick, unaggregated.
+//
+// Cost accounting, because a profiler that perturbs the thing it measures is
+// worthless: `B` is captured BEFORE this line is composed or written, so it is
+// the honest un-instrumented body time. The instrumentation's own cost is
+// reported separately as `X` (previous tick's, since the current one cannot be
+// known until after the write). Subtract X to get the true budget on a build
+// with profiling compiled out.
+//
+// Bandwidth: ~38 B/tick x 100 Hz = ~3.8 kB/s, about a third of the 115200 port.
+// The TX ring drains 115 B per 10 ms tick and we add 38, so it stays near
+// empty and the guarded write below effectively never has to drop.
+uint32_t prof_rxReqUs  = 0;    // micros() when a servo read request went out
+uint32_t prof_rxLatUs  = 0;    // request -> reply consumed, latched for one tick
+uint16_t prof_rxTo     = 0;    // servo read timeouts since the last emitted line
+uint16_t prof_dropped  = 0;    // profiler lines dropped (Serial1 ring full)
+uint32_t prof_printUs  = 0;    // previous tick's instrumentation cost
 
 // ── AX-12 HELPERS ────────────────────────────────────────────────────────────
 void ax12WriteByte(uint8_t id, uint8_t addr, uint8_t val) {
@@ -409,6 +450,7 @@ void pollLegServosTask() {
     uint8_t checksum = ~(s.id + 4 + 2 + 36 + 8) & 0xFF;
     uint8_t packet[] = {0xFF, 0xFF, s.id, 0x04, 0x02, 36, 8, checksum};
     Serial2.write(packet, 8);
+    prof_rxReqUs = micros();   // profiler: start of the request->reply window
 
     pollState     = POLL_WAITING;
     waitStartTime = now;
@@ -434,11 +476,15 @@ void pollLegServosTask() {
         s.volts        = voltRaw / 10.0f;
         s.temp         = tempRaw;
       }
+      // Request -> reply consumed. Spans two ticks, so it is NOT part of any
+      // single tick's body time; it measures the servo's own turnaround.
+      prof_rxLatUs    = micros() - prof_rxReqUs;
       currentServoIdx = (currentServoIdx + 1) % 4;
       lastPollTime    = millis();
       pollState       = POLL_IDLE;
     }
     else if (now - waitStartTime > 20) {          // timeout — servo silent
+      if (prof_rxTo < 0xFFFF) prof_rxTo++;
       while (Serial2.available()) Serial2.read();
       currentServoIdx = (currentServoIdx + 1) % 4;
       lastPollTime    = millis();
@@ -479,8 +525,8 @@ void parseCommand(char *cmd) {
 
   // PING:<token> -> PONG:<token>  (keeps latency_test.py working)
   if (cmd[0]=='P' && cmd[1]=='I' && cmd[2]=='N' && cmd[3]=='G') {
-    Serial3.print("PONG");
-    Serial3.println(cmd + 4);
+    snprintf(ack, sizeof(ack), "PONG%s", cmd + 4);
+    radioLine(ack);
     return;
   }
 
@@ -498,7 +544,7 @@ void parseCommand(char *cmd) {
     } else {
       snprintf(ack, sizeof(ack), "PS:ERR BAD_FORMAT");
     }
-    Serial3.println(ack);
+    radioLine(ack);
     return;
   }
 
@@ -563,7 +609,7 @@ void parseCommand(char *cmd) {
     g_torqueOn = want;
     markAllSettingsDirty();
     snprintf(ack, sizeof(ack), "ACK:TORQUE_%s", g_torqueOn ? "ON" : "LIMP");
-    Serial3.println(ack);
+    radioLine(ack);
     sendStateLine();
     return;
   }
@@ -610,7 +656,7 @@ void parseCommand(char *cmd) {
       ft_y[leg - 1] = atof(s2 + 1);
       if (poseMode == MODE_IK) startPoseMove();
     } else {
-      Serial3.println("FT:ERR BAD_FORMAT");
+      radioLine("FT:ERR BAD_FORMAT");
       return;
     }
   }
@@ -630,7 +676,7 @@ void parseCommand(char *cmd) {
       ft_x[1] = atof(c + 1);  ft_y[1] = atof(d + 1);
       if (poseMode == MODE_IK) startPoseMove();
     } else {
-      Serial3.println("FA:ERR BAD_FORMAT");
+      radioLine("FA:ERR BAD_FORMAT");
       return;
     }
   }
@@ -647,7 +693,7 @@ void parseCommand(char *cmd) {
   else if (cmd[0]=='S' && cmd[1]=='R') {
     initAX12Legs();
     snapPose();
-    Serial3.println("ACK:SERVOS_RESET");
+    radioLine("ACK:SERVOS_RESET");
     sendStateLine();
     return;
   }
@@ -688,6 +734,7 @@ void handleTelemetryRX() {
 void setup() {
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
+  Serial1.begin(115200);       // wired profiler port, PA9 = TX (output only)
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 
@@ -705,18 +752,39 @@ void setup() {
   lastTime     = micros();
   lastPollTime = millis();
 
-  Serial3.println("BOOT:OK AX12_CONTROL");
+  radioLine("BOOT:OK AX12_CONTROL");
+
+  // Legend for the raw per-tick rows. Printed once; setup() has no 10 ms
+  // deadline so an unguarded blocking write is fine here.
+  Serial1.println();
+  Serial1.println("# ax12_control tick profiler - one row per 100 Hz tick, all us");
+  Serial1.println("#   P  tick period            (target 10000)");
+  Serial1.println("#   B  loop body total        <- budget consumed");
+  Serial1.println("#   F  free time left of 10000");
+  Serial1.println("#   R  handleTelemetryRX + parseCommand");
+  Serial1.println("#   S  applySettingsTask      (servo register writes)");
+  Serial1.println("#   U  AX-12 bus              (sync-write / poll TX+RX)");
+  Serial1.println("#   T  telemetry build+write  (Serial3)");
+  Serial1.println("#   L  servo read latency, request->reply (0 = none this tick)");
+  Serial1.println("#   X  profiler cost itself, previous tick");
+  Serial1.println("#   !OVR body exceeded 10000   !ERR servo timeout or dropped row");
 }
 
 // ── MAIN LOOP (100 Hz) ───────────────────────────────────────────────────────
 void loop() {
   unsigned long now = micros();
-  if (now - lastTime < 10000) return;   // enforce 100 Hz
+  if (now - lastTime < TICK_US) return;   // enforce 100 Hz
+  uint32_t d_period = (uint32_t)(now - lastTime);
   lastTime = now;
+
+  uint32_t t_body = micros();
+  uint32_t mark   = t_body;
 
   // Uplink commands are latency-critical, so RX runs every 10 ms tick.
   handleTelemetryRX();
+  uint32_t d_rx = micros() - mark;   // includes parseCommand() and its acks
 
+  mark = micros();
   // At most one servo's settings pushed per tick (~630 us), never all four.
   // Gated on POLL_IDLE for the same reason the hold sync-write is: these are
   // 7 blocking writes, and their ~60 bytes of half-duplex echo landing while a
@@ -725,7 +793,9 @@ void loop() {
   // the read is lost — and dragging a compliance slider would silently punch
   // holes in the health readout exactly when you are watching it.
   if (pollState == POLL_IDLE) applySettingsTask();
+  uint32_t d_set = micros() - mark;
 
+  mark = micros();
   // ── BUS ARBITRATION ──────────────────────────────────────────────────────
   // Exactly ONE transaction owns Serial2 per tick. This matters more than it
   // looks: the health poll spans two ticks (request, then reply), and a
@@ -759,7 +829,9 @@ void loop() {
     isReadCycle = !isReadCycle;
     if (isReadCycle) pollLegServosTask();
   }
+  uint32_t d_bus = micros() - mark;   // ALL Serial2 traffic for this tick
 
+  mark = micros();
   // ── TELEMETRY @ 10 Hz — ONE short line per frame ────────────────────────
   // Same downlink budget as the balancing firmware. The 3DR/SiK link is
   // half-duplex TDM: each end only gets ~half the airtime, so a fat downlink
@@ -784,4 +856,35 @@ void loop() {
     static unsigned long lastState = 0;
     if (now - lastState >= 1000000) { lastState = now; sendStateLine(); }
   }
+  uint32_t d_tel = micros() - mark;
+
+  // ── PROFILER EMIT — every tick, raw, on Serial1 ──────────────────────────
+  // B is sampled HERE, before anything below runs, so it is the true body cost
+  // with the instrumentation excluded. F is what is left of the 10 ms.
+  uint32_t d_body = micros() - t_body;
+  int32_t  d_free = (int32_t)TICK_US - (int32_t)d_body;
+
+  uint32_t t_prof = micros();
+  {
+    char pl[96];
+    int n = snprintf(pl, sizeof(pl),
+      "P%lu B%lu F%ld R%lu S%lu U%lu T%lu L%lu X%lu%s%s\n",
+      (unsigned long)d_period, (unsigned long)d_body, (long)d_free,
+      (unsigned long)d_rx,  (unsigned long)d_set,
+      (unsigned long)d_bus, (unsigned long)d_tel,
+      (unsigned long)prof_rxLatUs, (unsigned long)prof_printUs,
+      (d_body > TICK_US) ? " !OVR" : "",
+      (prof_rxTo || prof_dropped) ? " !ERR" : "");
+
+    // Guarded exactly like the radio path — the profiler must never be the
+    // thing that stalls the loop it is measuring.
+    if (n > 0 && n < (int)sizeof(pl) && Serial1.availableForWrite() >= n) {
+      Serial1.write((uint8_t *)pl, n);
+      prof_rxTo = 0; prof_dropped = 0;
+    } else {
+      if (prof_dropped < 0xFFFF) prof_dropped++;
+    }
+    prof_rxLatUs = 0;   // latency is reported on the tick the reply landed
+  }
+  prof_printUs = micros() - t_prof;
 }

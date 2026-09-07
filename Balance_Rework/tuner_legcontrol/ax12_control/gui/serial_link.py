@@ -47,6 +47,12 @@ class SerialLink:
 
         # MCU state mirror, seeded with the firmware's own power-on defaults so
         # the GUI renders a sane pose before the first STATE line lands.
+        #
+        # THESE ARE A GUESS, NOT A REPORT. Until _state_seen goes True they are
+        # the GUI's own invention, and must never be fed back into a slider as
+        # though the firmware had said them -- that is exactly how a slider ends
+        # up snapping to a value nobody set. Callers gate on state_seen() /
+        # state_age() before treating anything in here as authoritative.
         self.fw = {
             "mode": 0, "torqueOn": 1,
             "torqueLimit": 1023, "compMargin": 1, "compSlope": 4, "movingSpeed": 0,
@@ -55,7 +61,8 @@ class SerialLink:
             "fx1": 1.0, "fy1": -151.1, "fx2": -6.0, "fy2": -149.6,
             "ik1": 1, "ik2": 1,
         }
-        self._state_seen = False
+        self._state_seen  = False
+        self._state_stamp = 0.0
 
         # Per-servo live readback. present_pos drives the FK "ghost" linkage;
         # goal is what the firmware currently commands. Their difference IS the
@@ -183,7 +190,8 @@ class SerialLink:
                     pass
         with self._lock:
             self.fw.update(new)
-            self._state_seen = True
+            self._state_seen  = True
+            self._state_stamp = time.time()
 
     # ── DATA ACCESS ──────────────────────────────────────────────────────────
     def state(self):
@@ -201,6 +209,17 @@ class SerialLink:
     def state_seen(self):
         with self._lock:
             return self._state_seen
+
+    def state_age(self):
+        """Seconds since the last real STATE line, or None if none ever came.
+
+        The freshness gate for every slider: a stale mirror is a stale opinion,
+        and a stale opinion must not overrule what the operator just set.
+        """
+        with self._lock:
+            if not self._state_seen:
+                return None
+            return time.time() - self._state_stamp
 
     # ── COMMAND API ──────────────────────────────────────────────────────────
     def _send(self, text):

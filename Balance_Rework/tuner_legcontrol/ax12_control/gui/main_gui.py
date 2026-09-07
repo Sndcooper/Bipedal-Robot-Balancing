@@ -47,6 +47,10 @@ SERVO_ROWS = [
     (1,  "Leg2 Right (ID 1)",  441),
 ]
 
+# A STATE line older than this is not evidence of anything. The firmware
+# sends one every second as a keepalive, so 3 s is three consecutive misses.
+STATE_STALE_S = 3.0
+
 MODE_CROUCH, MODE_IK = 0, 1
 
 
@@ -68,10 +72,13 @@ class SettingSlider(ttk.Frame):
         the rest of the session.
     """
 
-    def __init__(self, master, label, lo, hi, initial, on_change, hint=""):
+    def __init__(self, master, label, lo, hi, initial, on_change, hint="",
+                 on_resync=None):
         super().__init__(master)
         self.label_text = label
         self.on_change  = on_change
+        self._resync    = on_resync
+        self._retried   = False
         self._debounce  = None
         self._dragging  = False
         self._last_sent = int(initial)
@@ -119,15 +126,33 @@ class SettingSlider(ttk.Frame):
             return
         self._last_sent = v
         self._awaiting  = True
+        self._retried   = False
         self._deadline  = time.time() + 2.0
         self.on_change(v)
 
     def sync_from_firmware(self, value):
+        """Adopt a firmware value. The caller MUST have checked it is fresh.
+
+        On a missed ack this does NOT simply surrender to whatever the mirror
+        holds. From here a lost command and a lost ack look identical, and
+        guessing wrong means silently discarding what the operator set. So the
+        first timeout re-asks the firmware what it actually holds and waits one
+        more window. If the reply says the old value the command really was
+        lost, and reverting is both correct and informative; if it says the new
+        one then only the ack was lost, and nothing moves.
+        """
         value = int(value)
-        if self._awaiting and time.time() > self._deadline:
-            self._awaiting = False          # ack lost — stop ignoring firmware
         if self._awaiting and value == self._last_sent:
             self._awaiting = False          # ack arrived
+            self._retried  = False
+        elif self._awaiting and time.time() > self._deadline:
+            if not self._retried and self._resync is not None:
+                self._retried  = True
+                self._deadline = time.time() + 2.0
+                self._resync()              # ask the firmware directly
+                return
+            self._awaiting = False          # asked twice — believe the answer
+            self._retried  = False
         if self._dragging or self._awaiting:
             return
         if value != self.var.get():
@@ -305,12 +330,14 @@ class AX12App(tk.Tk):
         self.geometry("1480x940")
         self.minsize(1280, 820)
         self.link = None
+        self._poll_id = None
 
         self.port_var    = tk.StringVar(value="COM13")
         self.status_var  = tk.StringVar(value="Disconnected")
         self.torque_var  = tk.BooleanVar(value=True)
         self.mode_var    = tk.IntVar(value=MODE_CROUCH)
         self.target_var  = tk.StringVar(value="")
+        self.link_var    = tk.StringVar(value="link: --")
         self.crouch_var  = tk.DoubleVar(value=0.0)
 
         self._crouch_debounce = None
@@ -321,7 +348,7 @@ class AX12App(tk.Tk):
         self.refresh_target_readout()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.after(100, self._poll)
+        self._poll_id = self.after(100, self._poll)
 
     # ── header ───────────────────────────────────────────────────────────────
     def _build_header(self):
@@ -352,6 +379,8 @@ class AX12App(tk.Tk):
         ttk.Button(top, text="Save Profile", command=self.save_profile).pack(side=tk.LEFT, padx=2)
         ttk.Button(top, text="Load Profile", command=self.load_profile).pack(side=tk.LEFT, padx=2)
 
+        ttk.Label(top, textvariable=self.link_var, width=15,
+                  font=("Consolas", 9, "bold")).pack(side=tk.RIGHT, padx=8)
         ttk.Label(top, textvariable=self.status_var).pack(side=tk.RIGHT, padx=8)
 
     # ── body: plot on the left, all controls on the right ────────────────────
@@ -402,7 +431,8 @@ class AX12App(tk.Tk):
                            100, 3000, 800,
                            lambda v: self._on_setting("moveTime", v),
                            "ms for a pose move, any distance. "
-                           "smoothstep ramp, all 4 servos sync-written per tick")
+                           "smoothstep ramp, all 4 servos sync-written per tick",
+                           on_resync=self._request_state)
         mt.pack(fill=tk.X, padx=6, pady=(2, 4))
         self.settings["moveTime"] = mt
 
@@ -431,7 +461,8 @@ class AX12App(tk.Tk):
              "slew cap toward goal. 0 = uncapped"),
         ]:
             s = SettingSlider(set_box, label, lo, hi, init,
-                              lambda v, k=key: self._on_setting(k, v), hint)
+                              lambda v, k=key: self._on_setting(k, v), hint,
+                              on_resync=self._request_state)
             s.pack(fill=tk.X, padx=6, pady=3)
             self.settings[key] = s
 
@@ -610,6 +641,11 @@ class AX12App(tk.Tk):
             self.servo_vars[sid].set(max(lo, min(hi, int(data["pos"]))))
         self.status_var.set("Sliders loaded from present positions")
 
+    def _request_state(self):
+        """Ask the firmware to restate everything (the RB command)."""
+        if self.link:
+            self.link.request_state()
+
     def _on_setting(self, key, value):
         if not self.link:
             return
@@ -696,11 +732,24 @@ class AX12App(tk.Tk):
     # ── periodic refresh ─────────────────────────────────────────────────────
     def _poll(self):
         if self.link:
-            st = self.link.state()
+            st  = self.link.state()
+            age = self.link.state_age()
 
-            for key in self.settings:
-                if key in st:
-                    self.settings[key].sync_from_firmware(st[key])
+            # Sync sliders ONLY from a fresh, real STATE line. Two ways this
+            # goes wrong otherwise, and both look like "the slider moved on its
+            # own": age is None means no STATE has EVER arrived, so the mirror
+            # still holds the GUI's seeded guesses; a large age means the link
+            # died and the mirror is frozen at whatever it last heard. Neither
+            # is grounds for overruling what the operator just set.
+            if age is None:
+                self.link_var.set("link: no reply")
+            elif age > STATE_STALE_S:
+                self.link_var.set("link: STALE %.0fs" % age)
+            else:
+                self.link_var.set("link: ok")
+                for key in self.settings:
+                    if key in st:
+                        self.settings[key].sync_from_firmware(st[key])
 
             on = bool(st.get("torqueOn", 1))
             if on != self.torque_var.get():
@@ -712,7 +761,7 @@ class AX12App(tk.Tk):
 
             self._refresh_health()
 
-        self.after(150, self._poll)
+        self._poll_id = self.after(150, self._poll)
 
     def _refresh_health(self):
         snap = self.link.servo_snapshot()
@@ -768,6 +817,14 @@ class AX12App(tk.Tk):
         self.log_text.config(state=tk.DISABLED)
 
     def on_close(self):
+        # Cancel the queued tick first. Without this the pending after()
+        # fires into an already-destroyed widget on exit.
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
         self.disconnect()
         self.destroy()
 
