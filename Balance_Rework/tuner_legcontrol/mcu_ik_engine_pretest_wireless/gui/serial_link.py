@@ -7,6 +7,7 @@ telemetry and the new AX12 leg-subsystem state/health lines.
 
 import threading
 import time
+import os
 try:
     import serial
 except ImportError:
@@ -35,6 +36,19 @@ class SerialLink:
         self.auto_trim_on = False
         self._cutoff_time = None
         self._last_trim_commit = None   # (committed_deg, new_target, time.time())
+
+        # Serial Monitor Backup Logger (COM13 / active port)
+        self.auto_backup_enabled    = True
+        self.backup_active          = False
+        self.backup_file            = None
+        self.backup_filepath        = ""
+        self.backup_filename        = ""
+        self.backup_lines_count     = 0
+        self.last_cal_offset        = None
+        self.last_cal_time          = None
+        self.last_backup_saved_path = ""
+        self._backup_start_time     = 0.0
+        self._log_file_lock         = threading.Lock()
 
         # MCU state mirror — AX-12 leg subsystem
         self.ax12 = {
@@ -82,8 +96,133 @@ class SerialLink:
         self._running = False
         if self._thread:
             self._thread.join(timeout=1.0)
+        if self.backup_active:
+            self.stop_backup_session(reason="Port Disconnected / Closed")
         if self.ser and self.ser.is_open:
             self.ser.close()
+
+    # ── MOTOR STATE & BACKUP SESSION TRIGGERS ────────────────────────────────
+    def _set_motors_on(self, enabled: bool, reason: str = ""):
+        with self._lock:
+            prev = self.motors_on
+            self.motors_on = enabled
+            if enabled:
+                self._cutoff_time = None
+            elif "SAFETY" in reason:
+                self._cutoff_time = time.time()
+
+        if enabled and not prev:
+            if self.auto_backup_enabled:
+                self.start_backup_session(reason=reason or "Motors ENABLED")
+        elif not enabled and prev:
+            if self.backup_active:
+                self.stop_backup_session(reason=reason or "Motors DISABLED")
+
+    def start_backup_session(self, reason="Motors ON"):
+        with self._log_file_lock:
+            if self.backup_active and self.backup_file:
+                return  # already recording
+            try:
+                gui_dir = os.path.dirname(os.path.abspath(__file__))
+                logs_dir = os.path.join(gui_dir, "logs")
+                os.makedirs(logs_dir, exist_ok=True)
+                t_stamp = time.strftime("%Y%m%d_%H%M%S")
+                clean_port = str(self.port).replace("/", "_").replace("\\", "_").replace(":", "")
+                filename = f"serial_{clean_port}_{t_stamp}.log"
+                filepath = os.path.join(logs_dir, filename)
+
+                self.backup_file = open(filepath, "w", encoding="utf-8")
+                self.backup_filepath = filepath
+                self.backup_filename = filename
+                self.backup_active = True
+                self.backup_lines_count = 0
+                self._backup_start_time = time.time()
+
+                now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                cal_info = (
+                    f"Offset: {self.last_cal_offset:.4f}° (calibrated at {self.last_cal_time})"
+                    if self.last_cal_offset is not None
+                    else "No calibration recorded in this session"
+                )
+                with self._lock:
+                    fw_copy = dict(self.fw)
+
+                fw_summary = ", ".join(f"{k}={v}" for k, v in fw_copy.items()) if fw_copy else "Default / Awaiting sync"
+
+                header = (
+                    "================================================================================\n"
+                    "SERIAL MONITOR BACKUP LOG\n"
+                    f"Port: {self.port} | Baud: {self.baud}\n"
+                    f"Session Started: {now_str}\n"
+                    f"Trigger Reason: {reason}\n"
+                    f"Last IMU Calibration: {cal_info}\n"
+                    f"Active FW Parameters: {fw_summary}\n"
+                    "================================================================================\n"
+                    f"{'[Timestamp]':<26} {'[Dir]':<6} Payload\n"
+                    "--------------------------------------------------------------------------------\n"
+                )
+                self.backup_file.write(header)
+                self.backup_file.flush()
+                print(f"[SerialLink] Backup session started: {filepath}")
+            except Exception as e:
+                print(f"[SerialLink] Failed to start backup log: {e}")
+                self.backup_active = False
+                self.backup_file = None
+
+    def stop_backup_session(self, reason="Motors OFF"):
+        with self._log_file_lock:
+            if not self.backup_active or not self.backup_file:
+                return
+            try:
+                now = time.time()
+                ms = int((now % 1.0) * 1000)
+                t_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                duration = now - getattr(self, "_backup_start_time", now)
+                footer = (
+                    "--------------------------------------------------------------------------------\n"
+                    f"[{t_str}.{ms:03d}] [SYS] Session Stopped: {reason}\n"
+                    f"Total Duration: {duration:.2f}s | Total Lines Captured: {self.backup_lines_count}\n"
+                    "================================================================================\n"
+                )
+                self.backup_file.write(footer)
+                self.backup_file.flush()
+                self.backup_file.close()
+                self.last_backup_saved_path = self.backup_filepath
+                print(f"[SerialLink] Backup session ended: {self.backup_filepath} ({self.backup_lines_count} lines)")
+            except Exception as e:
+                print(f"[SerialLink] Error closing backup log: {e}")
+            finally:
+                self.backup_file = None
+                self.backup_active = False
+
+    def _log_entry(self, direction: str, text: str):
+        with self._log_file_lock:
+            if not self.backup_active or not self.backup_file:
+                return
+            try:
+                now = time.time()
+                ms = int((now % 1.0) * 1000)
+                t_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                line_entry = f"[{t_str}.{ms:03d}] [{direction}] {text}\n"
+                self.backup_file.write(line_entry)
+                self.backup_file.flush()
+                self.backup_lines_count += 1
+            except Exception as e:
+                print(f"[SerialLink] Backup write error: {e}")
+
+    def get_backup_status(self):
+        with self._log_file_lock:
+            return {
+                "active": self.backup_active,
+                "filepath": self.backup_filepath,
+                "filename": getattr(self, "backup_filename", ""),
+                "lines": self.backup_lines_count,
+                "last_saved": getattr(self, "last_backup_saved_path", ""),
+                "auto_enabled": self.auto_backup_enabled,
+            }
+
+    def set_auto_backup(self, enabled: bool):
+        self.auto_backup_enabled = bool(enabled)
 
     # ── BACKGROUND READER ────────────────────────────────────────────────────
     def _read_loop(self):
@@ -113,48 +252,61 @@ class SerialLink:
             if len(self.raw_log) > 1000:
                 self.raw_log.pop(0)
 
+        clean_line = line
         for prefix in ("PITCH:", "AX12:", "SRV:", "Updated ->", "BOOT:", "CAL:",
                        "ACK:", "TRIM:", "SAFETY:", "Motors ", "FT:", "FA:"):
             idx = line.find(prefix)
             if idx != -1:
-                line = line[idx:]
+                clean_line = line[idx:]
                 break
 
-        if line.startswith("PITCH:"):
-            self._parse_telemetry(line)
-        elif line.startswith("AX12:"):
-            self._parse_ax12_state(line)
-        elif line.startswith("SRV:"):
-            self._parse_servo_health(line)
-        elif line.startswith("Updated ->"):
-            self._parse_fw_update(line)
-        elif "SAFETY" in line:
-            with self._lock:
-                self._cutoff_time = time.time()
-                self.motors_on    = False
-        elif "Motors ENABLED" in line:
-            with self._lock:
-                self.motors_on    = True
-                self._cutoff_time = None
-        elif "Motors DISABLED" in line:
-            with self._lock:
-                self.motors_on = False
-        elif line.startswith("CAL:DONE"):
+        # Handle motor state transitions
+        if "Motors ENABLED" in clean_line:
+            self._set_motors_on(True, "Motors ENABLED")
+            self._log_entry("RX", line)
+            return
+        elif "Motors DISABLED" in clean_line:
+            self._log_entry("RX", line)
+            self._set_motors_on(False, "Motors DISABLED")
+            return
+        elif "SAFETY" in clean_line:
+            self._log_entry("RX", line)
+            self._set_motors_on(False, "SAFETY CUTOFF")
+            return
+
+        # Log incoming communication if backup is active
+        self._log_entry("RX", line)
+
+        if clean_line.startswith("PITCH:"):
+            self._parse_telemetry(clean_line)
+        elif clean_line.startswith("AX12:"):
+            self._parse_ax12_state(clean_line)
+        elif clean_line.startswith("SRV:"):
+            self._parse_servo_health(clean_line)
+        elif clean_line.startswith("Updated ->"):
+            self._parse_fw_update(clean_line)
+        elif clean_line.startswith("CAL:DONE"):
             try:
-                offset_str = line.split("OFFSET:")[1]
+                offset_str = clean_line.split("OFFSET:")[1].split(",")[0].strip()
+                val = float(offset_str)
                 with self._lock:
-                    self.fw["pitchOffset"] = float(offset_str)
+                    self.fw["pitchOffset"] = val
+                    self.last_cal_offset = val
+                    self.last_cal_time = time.strftime("%Y-%m-%d %H:%M:%S")
             except (IndexError, ValueError):
                 pass
-        elif line.startswith("ACK:AUTOTRIM_"):
+        elif clean_line.startswith("CAL:START"):
             with self._lock:
-                self.auto_trim_on = line.endswith("ON")
-        elif line.startswith("ACK:TORQUE_"):
+                self.last_cal_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        elif clean_line.startswith("ACK:AUTOTRIM_"):
             with self._lock:
-                self.ax12["torque_on"] = line.endswith("ON")
-        elif line.startswith("TRIM:DONE"):
+                self.auto_trim_on = clean_line.endswith("ON")
+        elif clean_line.startswith("ACK:TORQUE_"):
+            with self._lock:
+                self.ax12["torque_on"] = clean_line.endswith("ON")
+        elif clean_line.startswith("TRIM:DONE"):
             try:
-                parts = dict(p.split(":", 1) for p in line.split()[1:])
+                parts = dict(p.split(":", 1) for p in clean_line.split()[1:])
                 committed  = float(parts["COMMITTED"])
                 new_target = float(parts["TARGET"])
                 with self._lock:
@@ -187,8 +339,6 @@ class SerialLink:
             self.history["integral"].append(data.get("INT",     0.0))
             self.history["trim"].append(data.get("TRIM",    0.0))
 
-            if "MOT" in data:
-                self.motors_on = bool(int(data["MOT"]))
             if "ATE" in data:
                 self.auto_trim_on = bool(int(data["ATE"]))
 
@@ -215,6 +365,9 @@ class SerialLink:
             if len(self.history["t"]) > 500:
                 for k in self.history:
                     self.history[k].pop(0)
+
+        if "MOT" in data:
+            self._set_motors_on(bool(int(data["MOT"])), f"Telemetry MOT:{int(data['MOT'])}")
 
     def _parse_ax12_state(self, line):
         """Parses: AX12:MODE:0,TQ:1,TL:1023,CM:1,CS:4,MS:0,MT:800"""
@@ -328,6 +481,7 @@ class SerialLink:
 
     # ── COMMAND API — balance loop ────────────────────────────────────────────
     def _send(self, text):
+        self._log_entry("TX", text)
         if self.ser and self.ser.is_open:
             try:
                 self.ser.write((text + "\n").encode("utf-8"))

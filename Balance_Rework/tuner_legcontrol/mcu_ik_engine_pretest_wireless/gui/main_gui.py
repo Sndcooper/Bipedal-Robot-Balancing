@@ -12,7 +12,7 @@ Pairs with the unified firmware in ../firmware (mcu_ik_engine_pretest_wireless +
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import time
 import math
 import json
@@ -251,11 +251,12 @@ class BalanceTunerTab(ttk.Frame):
         left = ttk.Frame(self)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=3, minsize=280)
-        left.rowconfigure(1, weight=1)
+        left.rowconfigure(0, weight=3, minsize=260)
+        left.rowconfigure(1, weight=0)
+        left.rowconfigure(2, weight=1)
 
         plot_frame = ttk.LabelFrame(left, text="Live Telemetry")
-        plot_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        plot_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
 
         self.fig = Figure(figsize=(6, 4), dpi=100)
         self.ax  = self.fig.add_subplot(111)
@@ -272,10 +273,50 @@ class BalanceTunerTab(ttk.Frame):
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        log_frame = ttk.LabelFrame(left, text="Serial Monitor")
-        log_frame.grid(row=1, column=0, sticky="nsew")
+        # ── Live Servo Health & Temperatures ──────────────────────────────────
+        servo_frame = ttk.LabelFrame(left, text="Servo Temperatures & Health")
+        servo_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        servo_frame.columnconfigure((0, 1, 2, 3), weight=1)
+
+        self.servo_labels = {}
+        for col, (sid, name) in enumerate([(6, "Leg1 L"), (14, "Leg1 R"), (0, "Leg2 L"), (1, "Leg2 R")]):
+            box = tk.Frame(servo_frame, relief=tk.GROOVE, bd=1, padx=4, pady=3, bg="#f8f9fa")
+            box.grid(row=0, column=col, sticky="ew", padx=3, pady=3)
+
+            lbl_title = tk.Label(box, text=f"ID {sid} · {name}", font=("Helvetica", 8, "bold"), bg="#f8f9fa", fg="#555555")
+            lbl_title.pack(anchor="center")
+
+            lbl_val = tk.Label(box, text="--°C  |  --%", font=("Consolas", 10, "bold"), bg="#f8f9fa", fg="#111111")
+            lbl_val.pack(anchor="center")
+
+            self.servo_labels[sid] = (box, lbl_title, lbl_val)
+
+        log_frame = ttk.LabelFrame(left, text="Serial Monitor & Backup")
+        log_frame.grid(row=2, column=0, sticky="nsew")
+
+        # Backup control toolbar
+        bar = ttk.Frame(log_frame)
+        bar.pack(fill=tk.X, padx=4, pady=(2, 4))
+
+        self.auto_backup_var = tk.BooleanVar(value=True)
+        self.cb_auto = ttk.Checkbutton(
+            bar, text="Auto-Backup on Motor ON", variable=self.auto_backup_var,
+            command=self._toggle_auto_backup
+        )
+        self.cb_auto.pack(side=tk.LEFT, padx=(2, 6))
+
+        self.btn_rec = ttk.Button(bar, text="Manual REC", width=11, command=self._toggle_manual_rec)
+        self.btn_rec.pack(side=tk.LEFT, padx=2)
+
+        ttk.Button(bar, text="📁 Open Logs", command=self.open_logs_folder).pack(side=tk.LEFT, padx=4)
+
+        self.backup_lbl = ttk.Label(
+            bar, text="Backup: Armed", font=("Consolas", 9, "bold"), foreground="#2ca02c"
+        )
+        self.backup_lbl.pack(side=tk.RIGHT, padx=4)
+
         self.log_text = tk.Text(log_frame, height=8, state=tk.DISABLED)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
 
         tuning_frame = ttk.LabelFrame(self, text="Tuning  (balance PID + auto-trim + crouch)")
         tuning_frame.grid(row=0, column=1, sticky="nsew")
@@ -284,6 +325,36 @@ class BalanceTunerTab(ttk.Frame):
             ctrl = CoarseFineSlider(tuning_frame, spec, spec.start_val, self._on_slider)
             ctrl.pack(fill=tk.X, pady=4, padx=5)
             self.sliders[spec.key] = ctrl
+
+        # Save tuned values with comment button
+        btn_save = ttk.Button(
+            tuning_frame, text="💾 Save Tuned Params (with Comment)",
+            command=self.app.save_params_with_comment
+        )
+        btn_save.pack(fill=tk.X, padx=5, pady=(8, 4))
+
+    def _toggle_auto_backup(self):
+        if self.app.link:
+            self.app.link.set_auto_backup(self.auto_backup_var.get())
+
+    def _toggle_manual_rec(self):
+        if not self.app.link:
+            messagebox.showinfo("Not Connected", "Please connect to serial port first.")
+            return
+        b_stat = self.app.link.get_backup_status()
+        if b_stat["active"]:
+            self.app.link.stop_backup_session(reason="Manual Stop by User")
+        else:
+            self.app.link.start_backup_session(reason="Manual Start by User")
+
+    def open_logs_folder(self):
+        gui_dir = os.path.dirname(os.path.abspath(__file__))
+        logs_dir = os.path.join(gui_dir, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        try:
+            os.startfile(logs_dir)
+        except Exception:
+            messagebox.showinfo("Logs Directory", f"Logs folder:\n{logs_dir}")
 
     def _on_slider(self, key, val):
         if not (self.app.link and self.app.link.ser):
@@ -338,6 +409,47 @@ class BalanceTunerTab(ttk.Frame):
         self.log_text.insert(tk.END, "\n".join(lines))
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+
+        # Update backup status indicator
+        b_stat = app.link.get_backup_status()
+        if b_stat["active"]:
+            self.backup_lbl.config(
+                text=f"● REC: {b_stat['filename']} ({b_stat['lines']} lines)",
+                foreground="#d62728"
+            )
+            self.btn_rec.config(text="Stop REC")
+        else:
+            last = os.path.basename(b_stat["last_saved"]) if b_stat["last_saved"] else ""
+            if last:
+                self.backup_lbl.config(
+                    text=f"Saved: {last} ({b_stat['lines']} lines)",
+                    foreground="#444444"
+                )
+            else:
+                self.backup_lbl.config(
+                    text="Backup: Armed (Auto on Motor ON)" if b_stat["auto_enabled"] else "Backup: Disabled",
+                    foreground="#2ca02c" if b_stat["auto_enabled"] else "#888888"
+                )
+            self.btn_rec.config(text="Manual REC")
+
+        # Update servo temperature and health displays
+        srv_health = app.link.get_servo_health()
+        for sid, (box, lbl_title, lbl_val) in self.servo_labels.items():
+            if sid in srv_health:
+                temp = srv_health[sid].get("temp", 0)
+                load = srv_health[sid].get("load", 0.0)
+                lbl_val.config(text=f"{temp}°C  |  {load:.1f}%")
+                if temp >= 65:
+                    bg_col, fg_col = "#ffdddd", "#cc0000"
+                elif temp >= 55:
+                    bg_col, fg_col = "#fff3cd", "#856404"
+                elif temp > 0:
+                    bg_col, fg_col = "#e8f5e9", "#1b5e20"
+                else:
+                    bg_col, fg_col = "#f8f9fa", "#555555"
+                box.config(bg=bg_col)
+                lbl_title.config(bg=bg_col)
+                lbl_val.config(bg=bg_col, fg=fg_col)
 
 
 # ---------------------------------------------------------------------------
@@ -712,16 +824,20 @@ class KinematicsHealthTab(ttk.Frame):
             ttk.Label(row, text=name, width=18).pack(side=tk.LEFT)
             var = tk.IntVar(value=default_pos)
             self.servo_pos_vars[sid] = var
-            tk.Scale(row, orient=tk.HORIZONTAL, from_=0, to=1023,
-                     variable=var, length=300, showvalue=True).pack(side=tk.LEFT, padx=5)
+            scale = tk.Scale(row, orient=tk.HORIZONTAL, from_=0, to=1023,
+                     variable=var, length=300, showvalue=True,
+                     command=lambda val, s=sid: self.send_servo_position(s, val))
+            scale.pack(side=tk.LEFT, padx=5)
+            
             ttk.Button(row, text="Send", width=6,
                        command=lambda s=sid, v=var: self.send_servo_position(s, v.get())
                        ).pack(side=tk.LEFT, padx=5)
 
     def send_servo_position(self, servo_id, pos):
         if self.app.link:
-            self.app.link.set_servo_position(servo_id, pos)
-            self.app.status_var.set(f"Sent PS{servo_id} {pos}")
+            val = int(float(pos))
+            self.app.link.set_servo_position(servo_id, val)
+            self.app.status_var.set(f"Sent PS{servo_id} {val}")
 
     def update_tab(self):
         if not self.app.link:
@@ -806,7 +922,7 @@ class BalanceApp(tk.Tk):
         ttk.Button(top, text="Commit Trim", command=self.commit_trim).pack(side=tk.LEFT, padx=2)
         ttk.Label(top, textvariable=self.trim_var, width=14).pack(side=tk.LEFT)
 
-        ttk.Button(top, text="Save Params", command=self.save_params).pack(side=tk.LEFT, padx=8)
+        ttk.Button(top, text="💾 Save Params", command=self.save_params_with_comment).pack(side=tk.LEFT, padx=8)
         ttk.Button(top, text="Resync",      command=self.resync).pack(side=tk.LEFT, padx=2)
 
         # right-aligned live status
@@ -825,6 +941,8 @@ class BalanceApp(tk.Tk):
         port = self.port_var.get()
         try:
             self.link = SerialLink(port, baud=115200)
+            if hasattr(self, "tab_tuner") and hasattr(self.tab_tuner, "auto_backup_var"):
+                self.link.set_auto_backup(self.tab_tuner.auto_backup_var.get())
             self.link.connect()     # also sends RB for immediate state resync
             self.status_var.set(f"Connected to {port} @ 115200")
         except Exception as exc:
@@ -873,18 +991,62 @@ class BalanceApp(tk.Tk):
             self.link.request_state()
             self.status_var.set("State resync requested")
 
-    def save_params(self):
+    def save_params_with_comment(self):
+        comment = simpledialog.askstring(
+            "Save Tuned Parameters",
+            "Enter a comment or description for this tuning profile:\n(e.g., 'Stable on carpet, responsive balance')",
+            parent=self
+        )
+        if comment is None:
+            # User cancelled dialog
+            return
+
+        comment = comment.strip()
         profiles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
         os.makedirs(profiles_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename  = os.path.join(profiles_dir, f"params_{timestamp}.json")
-        data = {key: slider.get_value() for key, slider in self.tab_tuner.sliders.items()}
+
+        balance_params = {key: slider.get_value() for key, slider in self.tab_tuner.sliders.items()}
+
+        # Also capture AX-12 compliance / speed / IK foot targets if available
+        ax12_settings = {}
+        if hasattr(self, "tab_ax12") and hasattr(self.tab_ax12, "cmd_sliders"):
+            for k, s in self.tab_ax12.cmd_sliders.items():
+                ax12_settings[k] = s.get_value()
+
+        ik_targets = {}
+        if hasattr(self, "tab_ax12") and hasattr(self.tab_ax12, "ik_sliders"):
+            for k, s in self.tab_ax12.ik_sliders.items():
+                ik_targets[k] = s.get_value()
+
+        data = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "comment": comment,
+            "params": balance_params,
+            "ax12_settings": ax12_settings,
+            "ik_targets": ik_targets,
+        }
+        # Flat keys for backward compatibility
+        for k, v in balance_params.items():
+            data[k] = v
+
         try:
-            with open(filename, "w") as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
-            self.status_var.set(f"Saved to profiles/params_{timestamp}.json")
+            msg = f"Saved to profiles/params_{timestamp}.json"
+            if comment:
+                msg += f" ('{comment[:25]}...')" if len(comment) > 25 else f" ('{comment}')"
+            self.status_var.set(msg)
+            messagebox.showinfo(
+                "Profile Saved",
+                f"Tuned parameters saved to:\n\n{filename}\n\nComment: \"{comment if comment else '(none)'}\""
+            )
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
+
+    def save_params(self):
+        self.save_params_with_comment()
 
     # ── periodic refresh — only the active tab does heavy redraw work ─────────
     def _poll(self):
