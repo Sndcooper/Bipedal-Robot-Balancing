@@ -593,12 +593,18 @@ void pollLegServosTask() {
     if (now - lastPollTime < POLL_INTERVAL_MS) return;
     ServoState &s = legServos[currentServoIdx];
 
-    // Re-assert held pose (RAM only, no EEPROM wear) so the legs stay put.
-    ax12WriteByte(s.id, 24, 1);
-    ax12WriteWord(s.id, 34, s.torqueLimit);
-    ax12WriteWord(s.id, 30, s.goalPos);
+    // ── REMOVED: per-servo register writes from the poll slot ──────────────
+    // Goal position:  owned by ax12SyncWriteGoals() — one SYNC_WRITE packet
+    //                 broadcasts all 4 goals simultaneously. Writing goalPos
+    //                 here individually reintroduces the 80 ms stagger.
+    // Torque/settings: owned by applySettingsTask() via settingsDirtyMask.
+    //                  Writing s.torqueLimit / s.compMargin here (hardcoded
+    //                  struct fields) overrides g_torqueLimit / g_compMargin
+    //                  set by the GUI slider, and forces torque ON even after
+    //                  a TQ0 (limp) command — the exact bugs reported.
+    // The poll is now READ-ONLY: fire the request, parse the reply, nothing more.
 
-    while (Serial2.available()) Serial2.read();   // flush write echoes
+
 
     // READ addr 40 len 4 → Load(2B) Volt(1B) Temp(1B)
     uint8_t checksum = ~(s.id + 4 + 2 + 40 + 4) & 0xFF;
@@ -1017,13 +1023,7 @@ void setup() {
 
   profResetWindow();
   Serial1.println();
-  Serial1.println("# pretest_wireless tick profiler - 100 Hz, all us");
-  Serial1.println("#   P period(10000)  B body  F free  X profiler cost");
-  Serial1.println("#   I readIMU (I2C)        K calibrationTask");
-  Serial1.println("#   Y safety cutoff        E encoder->velocity");
-  Serial1.println("#   C balance PID+setMotors R telemetryRX+parse");
-  Serial1.println("#   V pollLegServosTask     T telemetry block");
-  Serial1.println("# 1 Hz report follows: worst 5 / best / mean / mode");
+  Serial1.println("# profiler: P period B body F free X overhead");
 }
 
 // ── MAIN LOOP (100 Hz) ────────────────────────────────────────────────────────

@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PlatformIO: Upload firmware to COM3",
+            "type": "shell",
+            "command": "C:\\Users\\vilas\\.platformio\\penv\\Scripts\\python.exe",
+            "args": [
+                "-m",
+                "platformio",
+                "run",
+                "--target",
+                "upload",
+                "--upload-port",
+                "COM3"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
