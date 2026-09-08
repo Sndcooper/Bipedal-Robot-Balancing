@@ -14,6 +14,53 @@ screen for balancing + IMU calibration.
 
 ---
 
+## STATUS: finished, working single-loop balancer (frozen baseline)
+
+This variant balances the robot untethered on 3DR radio and is the validated
+reference before Stage 2 (sensor fusion / cascade). Board: **genericSTM32F103CB**
+(the C8T6 die is 128 KB; the C8 board file under-declares it — see below).
+
+**Known-good gains** (from real bench sessions, auto-trim ON):
+
+| Kp | Ki | Kd | alpha | ATE | result |
+| --: | --: | --: | --: | :--: | --- |
+| 95 | 697 | 3.10 | 0.96 | **1** | pitch sd 0.77 deg, cleanest run logged |
+| 70 | 729.5 | 3.10 | 0.96 | **1** | pitch sd 1.27 deg |
+| 85 | 666.5 | 3.34 | 0.96 | 0 | sd 2.31 deg, saturated 4.2% -- usable but rougher |
+
+**Run with auto-trim (`TE1`) on.** Every `ATE:0` session in the tuning logs
+ended in `SAFETY:CUTOFF`; every `ATE:1` session survived. Let `trim_bias`
+settle (~10-15 s) before committing with `TC` -- committing early bakes in a
+half-converged bias permanently.
+
+**Fixed this round** (see `firmware/src/main.cpp` diff at commit `5847bdd`):
+- Crouch (`CR<mm>`) now routes through the interpolated trajectory engine --
+  previously it cached goals but never updated `cur_x/cur_y` or sync-wrote,
+  so telemetry lied and the next pose move would slam the legs.
+- AX-12 status **ERROR byte** (overheat/overload) is now captured and exposed
+  as `SRV:id,temp,load,err,fail` -- previously discarded, so a servo latched
+  in Alarm Shutdown looked identical to a healthy one (temp just froze).
+- `initAX12Legs()` now applies the live compliance/torque globals instead of
+  frozen struct defaults, so an `SR` reset no longer silently discards slider
+  settings.
+- Flash headroom: was at 99.4% of the declared 64 KB; `genericSTM32F103CB`
+  unlocks the real 128 KB (now 49.7%).
+
+**Known issues to carry into Stage 2, not re-discover:**
+- `MAX_INTEGRAL_PWM = 1200` is 4.7x the actual PWM range (+/-255) -- anti-windup
+  in name only. One logged session pinned it at the clamp.
+- `Kp` around 85-95 is only linear to +/-2.7-3.0 deg pitch; ~15% of logged
+  samples exceeded that and saturated the motors. A velocity/tilt-bias cascade
+  (Stage 2) should let `Kp` drop and widen the linear range instead of relying
+  on auto-trim to save it.
+- **No persistence.** A board reset (brownout suspected -- motor + servo
+  stall current on a shared rail) silently reverts `Kp/Ki/Kd/pitchOffset` to
+  compiled defaults while the GUI keeps displaying stale values. Confirm via
+  the firmware's own `Updated ->` line, not the GUI slider, after any
+  unexplained behavior change.
+
+---
+
 ## ⚡ Hardware Connections
 
 ```
