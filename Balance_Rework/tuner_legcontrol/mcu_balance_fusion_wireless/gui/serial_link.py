@@ -455,7 +455,7 @@ class SerialLink:
             "P": "Kp", "I": "Ki", "D": "Kd",
             "Offset": "pitchOffset",
             "Target": "targetAngle", "Alpha": "alpha", "Tilt": "maxSafeTilt",
-            "TrimGain": "Ki_trim", "Crouch": "crouchOffset",
+            "TrimGain": "Ki_trim", "Crouch": "crouchOffset", "VP": "Kp_vel",
         }
         try:
             _, payload = line.split("->", 1)
@@ -518,6 +518,8 @@ class SerialLink:
     def commit_trim(self):             self._send("TC")
 
     def set_crouch(self, val):         self._send(f"CR{val}")
+    # Outer velocity-loop P gain: deg of lean per (count/s) of velocity error.
+    def set_vel_p(self, val):          self._send(f"VP{val}")
     def set_servo_position(self, servo_id, pos):
         self._send(f"PS{int(servo_id)} {int(pos)}")
 

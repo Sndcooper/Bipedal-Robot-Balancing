@@ -52,7 +52,10 @@ PARAM_SPECS = [
     ParamSpec("targetAngle", "Target",  -20.0,  20.0, 0.1,   5.0,  0.01,   3,   0.0),
     ParamSpec("alpha",       "alpha",    0.80, 0.999, 0.001, 0.02, 0.0001, 4,  0.96),
     ParamSpec("maxSafeTilt", "Max Tilt", 5.0,  50.0, 0.1,   5.0,  0.01,   2,  25.0),
-    ParamSpec("Ki_trim",     "Trim Gain",0.0,  0.03, 0.001, 0.003,0.0001, 5, 0.001),
+    # Outer velocity loop. Kp_vel reacts to a push NOW; Ki_trim learns the
+    # standing CoM offset over ~10 s. Both output DEGREES OF LEAN, not PWM.
+    ParamSpec("Kp_vel",      "Vel P (lean)",0.0, 0.02, 0.0005, 0.002, 0.0001, 5, 0.0030),
+    ParamSpec("Ki_trim",     "Vel I (trim)",0.0, 0.03, 0.001,  0.003, 0.0001, 5, 0.0015),
     ParamSpec("crouchOffset","Crouch",   0.0,  80.0, 1.0,  10.0,  0.1,    1,   0.0),
 ]
 
@@ -367,6 +370,7 @@ class BalanceTunerTab(ttk.Frame):
         elif key == "alpha":       lk.set_alpha(val)
         elif key == "maxSafeTilt": lk.set_tilt(val)
         elif key == "Ki_trim":     lk.set_trim_gain(val)
+        elif key == "Kp_vel":      lk.set_vel_p(val)
         elif key == "crouchOffset":lk.set_crouch(val)
 
     def update_tab(self):

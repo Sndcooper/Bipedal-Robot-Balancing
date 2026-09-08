@@ -222,7 +222,12 @@ float integral = 0.0f;
 float alpha = 0.96f;                        // complementary-filter coefficient
 float targetAngle = 0.0f;                   // balance setpoint (operator trim)
 float maxSafeTilt = 25.0f;                  // safety cutoff threshold (deg)
-const float MAX_INTEGRAL_PWM = 1200.0f;     // anti-windup: cap Ki term's PWM (10x, per request)
+// Anti-windup cap on the Ki term, in PWM units. MUST stay well inside the
+// actuator range (+/-255) or it is a clamp in name only: at 1200 the integral
+// term ALONE could command 4.7x everything the motors can deliver, so the
+// integrator saturated the output long before its own clamp ever engaged.
+// Logged sessions showed it pinned at the clamp while the robot fell over.
+const float MAX_INTEGRAL_PWM = 64.0f;       // 25% of range, leaves Kp/Kd headroom
 
 // ── ENCODER VELOCITY (telemetry display; also feeds auto-trim below) ────────
 float vel_current = 0.0f;
@@ -235,11 +240,33 @@ float vel_alpha   = 0.85f;
 // off from the true balance point, so integrate vel_current toward zero and
 // add the result on top of targetAngle. "TC" then bakes the converged bias
 // into targetAngle permanently, replacing a manual re-trim.
-bool  autoTrimEnabled = false;          // off by default — opt in with TE1
-float Ki_trim         = 0.001f;         // deg of bias per (count/s) per second — TG cmd
-float trim_bias       = 0.0f;           // current auto-trim contribution (deg)
-const float MAX_TRIM_BIAS = 15.0f;      // anti-windup clamp (deg) — widened 3x, capped
-                                         // well under maxSafeTilt (25°) on purpose: see note below.
+// ── OUTER LOOP: VELOCITY -> LEAN ANGLE (the cascade) ────────────────────────
+// THE KEY IDEA: this loop's output is an ANGLE, not a PWM. A balancing robot
+// cannot be commanded to move directly -- leaning IS how it accelerates. So a
+// velocity error is converted into the lean the inner loop must then hold.
+//
+//   pushed FORWARD  ->  vel_current > 0  ->  (0 - vel) < 0  ->  lean_cmd < 0
+//                   ->  robot leans BACKWARD  ->  gravity decelerates it
+//
+// Verified in simulation: with this sign a 0.35 m/s push recovers with ~7 cm
+// of drift; with the sign flipped the robot falls in 1.29 s.
+//
+// Why a cascade at all: the torque->position transfer function has a
+// RIGHT-HALF-PLANE zero at ~7.1 rad/s (to move forward the wheels must first
+// go backward). That caps any velocity loop at ~0.56 Hz, while the unstable
+// pole at 11 rad/s forces the balance loop to run 10x faster. One flat PID
+// has a single bandwidth and physically cannot serve both.
+bool  autoTrimEnabled = true;           // velocity loop ON by default in this variant
+                                         // (TE0 disables it -> reverts to pure single-loop
+                                         //  PID, so the two can be A/B compared on the bench)
+float Kp_vel  = 0.0030f;                // deg of lean per (count/s) of error  — VP cmd
+float Ki_trim = 0.0015f;                // deg of lean per (count/s) per second — TG cmd
+float trim_bias = 0.0f;                 // integral part of the lean command (deg)
+float lean_cmd  = 0.0f;                 // TOTAL commanded lean = P + I (deg), telemetry
+// Clamped in DEGREES because that is what this loop outputs. 6 deg is a real
+// lean the robot can hold; the old 15 deg was 60% of the 25 deg safety cutoff,
+// so a wound-up bias could trip the cutoff on its own.
+const float MAX_TRIM_BIAS = 6.0f;
 
 bool motorsEnabled = false;
 bool safetyLatched = false;
@@ -941,6 +968,10 @@ void parseCommand(char *cmd) {
     return;
   }
   else if (cmd[0]=='T' && cmd[1]=='G') Ki_trim = atof(cmd + 2);
+  // VP<f> — outer-loop proportional gain, deg of lean per (count/s).
+  // Checked before any single-char 'V' case would be (there are none), and
+  // before 'T'/'C' so it can never be mistaken for tilt or calibrate.
+  else if (cmd[0]=='V' && cmd[1]=='P') Kp_vel = atof(cmd + 2);
   else if (cmd[0]=='P' && cmd[1]=='S') {
     // Raw per-servo position, e.g. "PS6 750" — bypasses the crouch IK entirely,
     // for moving/testing exactly one joint. Checked before the single-letter
@@ -1018,8 +1049,8 @@ void parseCommand(char *cmd) {
 
   // Ack for tuning commands — parsed by _parse_fw_update() in the GUI.
   snprintf(ack, sizeof(ack),
-    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f Crouch:%.2f",
-    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffset);
+    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f Crouch:%.2f VP:%.4f",
+    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffset, Kp_vel);
   uint8_t len = (uint8_t)strlen(ack);
   ack[len] = '\n'; len++;
   if (Serial3.availableForWrite() >= len)
@@ -1138,18 +1169,28 @@ void loop() {
   if (!motorsEnabled || calibrating) {
     integral  = 0.0f;
     trim_bias = 0.0f;
+    lean_cmd  = 0.0f;
     setMotors(0, 0);
   } else {
+    // ── OUTER LOOP (slow, ~0.5 Hz): velocity error -> lean angle ───────────
+    // Target velocity is always 0 in this variant (no drive command), so any
+    // steady vel_current is unwanted motion. The P term reacts to a push
+    // immediately; the I term learns the standing CoM/mounting offset that
+    // used to need a hand re-trim. Both output DEGREES OF LEAN.
     if (autoTrimEnabled) {
-      // Same sign convention as RC_mcu_IK_wireless's velocity-integral tilt
-      // bias: there's no drive command in this variant, so the implied
-      // target velocity is always 0 — any steady vel_current is drift from
-      // a wrong targetAngle, integrated out here instead of by hand.
-      trim_bias += Ki_trim * (0.0f - vel_current) * dt;
+      float vel_error = 0.0f - vel_current;            // counts/s, want zero
+      trim_bias += Ki_trim * vel_error * dt;
       trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      lean_cmd   = (Kp_vel * vel_error) + trim_bias;
+      lean_cmd   = constrain(lean_cmd, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+    } else {
+      lean_cmd = 0.0f;                                  // pure single-loop mode
     }
 
-    float error = (targetAngle + trim_bias) - pitch;
+    // ── INNER LOOP (fast, ~10 Hz): hold the commanded lean ─────────────────
+    // Unchanged from the validated single-loop tune EXCEPT its setpoint, which
+    // is now driven by the outer loop instead of being a fixed trim.
+    float error = (targetAngle + lean_cmd) - pitch;
 
     integral += error * dt;
     if (Ki > 1e-6f) {                       // anti-windup: clamp integrator STATE
@@ -1223,7 +1264,7 @@ void loop() {
       "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
       "TORQ:%d,CR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d\n",
       pitch, output, integral, encL, encR, vel_current,
-      (int)motorsEnabled, maxSafeTilt, trim_bias,
+      (int)motorsEnabled, maxSafeTilt, lean_cmd,
       (int)autoTrimEnabled, (int)safetyLatched,
       (int)g_torqueOn, crouchOffset,
       cur_x[0], cur_y[0], cur_x[1], cur_y[1],
