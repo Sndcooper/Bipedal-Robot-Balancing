@@ -71,11 +71,15 @@ class SerialLink:
         self.raw_log = []
 
         # Servo health (Tab 3)
+        # err  = AX-12 status ERROR byte (bit2 overheat, bit5 overload, ...)
+        # fail = consecutive reads with no valid reply. Either being non-zero
+        #        means the servo is NOT obeying goal writes, which previously
+        #        showed up only as a temperature that quietly stopped changing.
         self.servo_health = {
-            6:  {"temp": 0, "load": 0.0},
-            0:  {"temp": 0, "load": 0.0},
-            14: {"temp": 0, "load": 0.0},
-            1:  {"temp": 0, "load": 0.0},
+            6:  {"temp": 0, "load": 0.0, "err": 0, "fail": 0},
+            0:  {"temp": 0, "load": 0.0, "err": 0, "fail": 0},
+            14: {"temp": 0, "load": 0.0, "err": 0, "fail": 0},
+            1:  {"temp": 0, "load": 0.0, "err": 0, "fail": 0},
         }
 
     def connect(self):
@@ -413,7 +417,11 @@ class SerialLink:
                 self.ax12["move_active"]   = bool(int(data["MOVE"]))
 
     def _parse_servo_health(self, line):
-        """Parses: SRV:<id>,<temp>,<load%>  e.g. SRV:6,45,12.5"""
+        """Parses: SRV:<id>,<temp>,<load%>[,<err>,<fail>]
+
+        The trailing err/fail fields are optional so an older firmware build
+        still parses; they default to 0.
+        """
         try:
             _, payload = line.split(":", 1)
             parts = payload.split(",")
@@ -425,10 +433,19 @@ class SerialLink:
                     load = float(load_str) if load_str else 0.0
                 except ValueError:
                     load = 0.0
+                def _int_at(idx):
+                    try:
+                        return int(parts[idx].strip()) if len(parts) > idx else 0
+                    except ValueError:
+                        return 0
+                err  = _int_at(3)
+                fail = _int_at(4)
                 with self._lock:
                     if sid in self.servo_health:
                         self.servo_health[sid]["temp"] = temp
                         self.servo_health[sid]["load"] = load
+                        self.servo_health[sid]["err"]  = err
+                        self.servo_health[sid]["fail"] = fail
         except Exception:
             pass
 

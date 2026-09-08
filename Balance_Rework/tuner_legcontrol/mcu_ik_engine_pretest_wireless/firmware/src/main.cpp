@@ -217,7 +217,7 @@ float gyroRate = 0.0f;
 #define GYRO_PITCH_SIGN 1.0f     // flip to -1.0f if pitch runs the wrong way
 
 // ── THE SINGLE BALANCE PID (the ONLY control loop) ───────────────────────────
-float Kp = 78.0f, Ki = 0.0f, Kd = 0.0f;   // neutral bench-tuning start
+float Kp = 78.0f, Ki = 650.0f, Kd = 3.52f;   // neutral bench-tuning start
 float integral = 0.0f;
 float alpha = 0.96f;                        // complementary-filter coefficient
 float targetAngle = 0.0f;                   // balance setpoint (operator trim)
@@ -288,6 +288,14 @@ struct ServoState {
   uint8_t  compSlope;
   uint8_t  temp;
   float    loadPct;
+  // ── LIVENESS / ALARM ──────────────────────────────────────────────────────
+  // A servo that latches an AX-12 Alarm Shutdown (overheat / overload) goes
+  // limp and silently IGNORES every goal write. Before these fields existed the
+  // only symptom was temp freezing at its last value — or 0 if it never
+  // answered at all — which is indistinguishable from "working fine, just not
+  // polled yet". That is exactly how four servos cooked themselves unnoticed.
+  uint8_t  err;          // status-packet ERROR byte: bit2 overheat, bit5 overload
+  uint8_t  failCount;    // consecutive reads with no valid reply (255 = capped)
 };
 
 // Torque/compliance restored to the responsive baseline (was 511 / margin 4 /
@@ -299,10 +307,10 @@ struct ServoState {
 //   compMargin     4 -> 1   : narrow deadband, reacts to small errors
 //   compSlope     32 -> 4   : tight proportional band, no sluggish ease-in
 ServoState legServos[4] = {
-  {6,  818, 1023, 1, 4, 0, 0.0f},   // Leg1 Left  (818 = straight-down left)
-  {0,  818, 1023, 1, 4, 0, 0.0f},   // Leg2 Left
-  {14, 441, 1023, 1, 4, 0, 0.0f},   // Leg1 Right (441 = straight-down right)
-  {1,  441, 1023, 1, 4, 0, 0.0f},   // Leg2 Right
+  {6,  818, 1023, 1, 4, 0, 0.0f, 0, 0},   // Leg1 Left  (818 = straight-down left)
+  {0,  818, 1023, 1, 4, 0, 0.0f, 0, 0},   // Leg2 Left
+  {14, 441, 1023, 1, 4, 0, 0.0f, 0, 0},   // Leg1 Right (441 = straight-down right)
+  {1,  441, 1023, 1, 4, 0, 0.0f, 0, 0},   // Leg2 Right
 };
 
 // ── GLOBAL SERVO SETTINGS (ported from ax12_control — applies to all four) ───
@@ -411,11 +419,14 @@ void initAX12Legs() {
     ax12WriteByte(id, 16, 1);                         // Status Return Level (EEPROM, once)
     ax12WriteByte(id, 5,  0);                         // Return Delay Time = 0 (EEPROM, once)
     ax12WriteByte(id, 24, 1);                         // Torque Enable
-    ax12WriteWord(id, 34, legServos[i].torqueLimit);  // Torque Limit
-    ax12WriteByte(id, 26, legServos[i].compMargin);   // CW  Compliance Margin
-    ax12WriteByte(id, 27, legServos[i].compMargin);   // CCW Compliance Margin
-    ax12WriteByte(id, 28, legServos[i].compSlope);    // CW  Compliance Slope
-    ax12WriteByte(id, 29, legServos[i].compSlope);    // CCW Compliance Slope
+    // Globals, not the struct's frozen construction-time copies — otherwise a
+    // servo reset (SR) silently reverts to 1023/1/4 and discards whatever the
+    // operator set on the sliders.
+    ax12WriteWord(id, 34, g_torqueLimit);             // Torque Limit
+    ax12WriteByte(id, 26, g_compMargin);              // CW  Compliance Margin
+    ax12WriteByte(id, 27, g_compMargin);              // CCW Compliance Margin
+    ax12WriteByte(id, 28, g_compSlope);               // CW  Compliance Slope
+    ax12WriteByte(id, 29, g_compSlope);               // CCW Compliance Slope
     ax12WriteWord(id, 30, legServos[i].goalPos);      // Goal Position (standing pose)
   }
 }
@@ -649,12 +660,21 @@ void pollLegServosTask() {
         uint8_t  temp    = reply[8];
         legServos[currentServoIdx].temp    = temp;
         legServos[currentServoIdx].loadPct = ((loadRaw & 0x3FF) / 1023.0f) * 100.0f;
+        // reply[4] is the status packet's ERROR byte. Ignoring it was the whole
+        // problem: an overheat/overload shutdown is reported HERE and nowhere
+        // else, so a latched servo looked identical to a healthy one.
+        legServos[currentServoIdx].err       = reply[4];
+        legServos[currentServoIdx].failCount = 0;
+      } else if (legServos[currentServoIdx].failCount < 255) {
+        legServos[currentServoIdx].failCount++;   // header mismatch = bad read
       }
       currentServoIdx = (currentServoIdx + 1) % 4;
       lastPollTime    = millis();
       pollState       = POLL_IDLE;
     }
     else if (now - waitStartTime > 20) {          // timeout — servo silent
+      if (legServos[currentServoIdx].failCount < 255)
+        legServos[currentServoIdx].failCount++;
       ax12DrainRx();
       currentServoIdx = (currentServoIdx + 1) % 4;
       lastPollTime    = millis();
@@ -963,12 +983,15 @@ void parseCommand(char *cmd) {
     // Crouch bar — checked before the bare 'C' (calibrate) case, or "CR40"
     // would trigger an IMU calibration instead of setting crouch depth.
     crouchOffset = atof(cmd + 2);
-    // legs move (and hold, torque-independent of motorsEnabled) — same solver
-    // solveGoalsFor() uses for FT/FA/HM moves, just applied immediately instead
-    // of through the interpolated trajectory engine.
-    float fx[2] = {ik_fx1, ik_fx2};
-    float fy[2] = {ik_fy1 + crouchOffset, ik_fy2 + crouchOffset};
-    solveGoalsFor(fx, fy);
+    // Route through the SAME interpolated trajectory engine every other pose
+    // command uses. The old path called solveGoalsFor() on local fx/fy, which
+    // cached goalPos but left cur_x/cur_y frozen at the standing pose. Two
+    // consequences, both observed: telemetry reported FY1 = -151.10 no matter
+    // what crouch was set to, and the NEXT interpolated move (mode switch, FT,
+    // HM) started from that stale position and slammed the legs. It also never
+    // called ax12SyncWriteGoals(), so the new goals waited on the 10 Hz hold
+    // write — which is itself gated on pollState == POLL_IDLE.
+    if (poseMode == MODE_CROUCH) startPoseMove();
   }
   else if (cmd[0] == 'C') { startCalibration(); return; }
   else if (cmd[0] == 'R') {
@@ -1229,8 +1252,9 @@ void loop() {
     if (now - lastHealth >= 1000000) {
       lastHealth = now;
       ServoState &h = legServos[healthIdx];
-      int k = snprintf(line, sizeof(line), "SRV:%u,%u,%.1f\n",
-                       (unsigned)h.id, (unsigned)h.temp, h.loadPct);
+      int k = snprintf(line, sizeof(line), "SRV:%u,%u,%.1f,%u,%u\n",
+                       (unsigned)h.id, (unsigned)h.temp, h.loadPct,
+                       (unsigned)h.err, (unsigned)h.failCount);
       if (k > 0 && k < (int)sizeof(line) && Serial3.availableForWrite() >= k)
         Serial3.write((uint8_t*)line, k);
       healthIdx = (healthIdx + 1) % 4;

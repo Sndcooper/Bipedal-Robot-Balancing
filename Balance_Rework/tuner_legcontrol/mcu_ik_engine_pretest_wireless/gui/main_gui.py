@@ -47,8 +47,8 @@ class ParamSpec:
 # Balance loop parameters
 PARAM_SPECS = [
     ParamSpec("Kp",          "Kp",       0.0,  200.0, 0.1,   5.0,  0.01,   3,  78.0),
-    ParamSpec("Ki",          "Ki",       0.0, 1000.0, 0.5,   1.0,  0.001,  4,   0.0),
-    ParamSpec("Kd",          "Kd",       0.0,   50.0, 0.1,  10.0,  0.01,   3,   0.0),
+    ParamSpec("Ki",          "Ki",       0.0, 1000.0, 0.5,   1.0,  0.001,  4, 650.0),
+    ParamSpec("Kd",          "Kd",       0.0,   50.0, 0.1,  10.0,  0.01,   3,   3.52),
     ParamSpec("targetAngle", "Target",  -20.0,  20.0, 0.1,   5.0,  0.01,   3,   0.0),
     ParamSpec("alpha",       "alpha",    0.80, 0.999, 0.001, 0.02, 0.0001, 4,  0.96),
     ParamSpec("maxSafeTilt", "Max Tilt", 5.0,  50.0, 0.1,   5.0,  0.01,   2,  25.0),
@@ -438,15 +438,35 @@ class BalanceTunerTab(ttk.Frame):
             if sid in srv_health:
                 temp = srv_health[sid].get("temp", 0)
                 load = srv_health[sid].get("load", 0.0)
-                lbl_val.config(text=f"{temp}°C  |  {load:.1f}%")
-                if temp >= 65:
+                err  = srv_health[sid].get("err", 0)
+                fail = srv_health[sid].get("fail", 0)
+
+                # An AX-12 that latched Alarm Shutdown goes limp and IGNORES
+                # every goal write. Surfacing it is the whole point: previously
+                # the only clue was a temperature that stopped changing, which
+                # looks identical to a healthy servo.
+                flags = []
+                if err & 0x04: flags.append("OVERHEAT")
+                if err & 0x20: flags.append("OVERLOAD")
+                if err & 0x01: flags.append("VOLTAGE")
+                if err & 0x02: flags.append("ANGLE")
+
+                if fail >= 3:
+                    lbl_val.config(text=f"NO REPLY x{fail}")
                     bg_col, fg_col = "#ffdddd", "#cc0000"
-                elif temp >= 55:
-                    bg_col, fg_col = "#fff3cd", "#856404"
-                elif temp > 0:
-                    bg_col, fg_col = "#e8f5e9", "#1b5e20"
+                elif flags:
+                    lbl_val.config(text=f"{temp}°C  {'+'.join(flags)}")
+                    bg_col, fg_col = "#ffdddd", "#cc0000"
                 else:
-                    bg_col, fg_col = "#f8f9fa", "#555555"
+                    lbl_val.config(text=f"{temp}°C  |  {load:.1f}%")
+                    if temp >= 65:
+                        bg_col, fg_col = "#ffdddd", "#cc0000"
+                    elif temp >= 55:
+                        bg_col, fg_col = "#fff3cd", "#856404"
+                    elif temp > 0:
+                        bg_col, fg_col = "#e8f5e9", "#1b5e20"
+                    else:
+                        bg_col, fg_col = "#f8f9fa", "#555555"
                 box.config(bg=bg_col)
                 lbl_title.config(bg=bg_col)
                 lbl_val.config(bg=bg_col, fg=fg_col)
@@ -876,8 +896,12 @@ class BalanceApp(tk.Tk):
         self.offset_entry_var = tk.StringVar(value="0.0")
         self.trim_var         = tk.StringVar(value="Trim: --")
         self.auto_trim_var    = tk.BooleanVar(value=False)
+        self._last_known_offset = None
 
         self._build_header()
+
+        self.bind("<c>", self._on_key_c)
+        self.bind("<C>", self._on_key_c)
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -961,6 +985,11 @@ class BalanceApp(tk.Tk):
 
     def safety_reset(self):
         if self.link: self.link.arm_cutoff_watch()
+
+    def _on_key_c(self, event):
+        # Don't trigger calibration if user is typing in an entry box
+        if not isinstance(self.focus_get(), (tk.Entry, ttk.Entry)):
+            self.calibrate()
 
     def calibrate(self):
         if self.link: self.link.calibrate()
@@ -1056,7 +1085,13 @@ class BalanceApp(tk.Tk):
             self.auto_trim_var.set(self.link.auto_trim_on)
 
             offset_val = self.link.fw.get("pitchOffset")
-            self.offset_var.set(f"Offset: {offset_val:.2f}" if offset_val is not None else "Offset: --")
+            if offset_val is not None:
+                self.offset_var.set(f"Offset: {offset_val:.4f}")
+                if offset_val != self._last_known_offset:
+                    self._last_known_offset = offset_val
+                    # Don't overwrite if the user is currently typing a new offset
+                    if not isinstance(self.focus_get(), (tk.Entry, ttk.Entry)):
+                        self.offset_entry_var.set(f"{offset_val:.4f}")
 
             active_tab = self.notebook.index(self.notebook.select())
             if active_tab == 0:
