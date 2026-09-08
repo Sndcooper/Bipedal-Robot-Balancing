@@ -15,9 +15,11 @@ Meet **PAW** — the physical build of this project, 3D-printed and assembled on
 
 *Left: front view showing the two articulated Dynamixel-driven legs, wheel motors, and the 3D-printed chassis with carry handle. Right: top-down view of the chassis, showing the parallel-link leg mechanism and the orange gripper arms mounted at the front.*
 
-**🎥 Demo video:** [`media/paw_demo.mp4`](media/paw_demo.mp4) — a short clip of PAW balancing and moving under its own control loop.
+**🎥 Demo video:** PAW balancing and moving under its own control loop.
 
-> GitHub doesn't auto-play a video pushed via `git push`; click the link above to stream/download it. For an inline auto-playing preview in this README, drag-and-drop the file into a GitHub issue/PR comment box instead — GitHub will host it on its CDN and hand you an embeddable link.
+https://github.com/user-attachments/assets/27b52d88-99b3-40d9-a2d7-85beb14acbb2
+
+*(A raw copy of this clip is also kept in-repo at [`media/paw_demo.mp4`](media/paw_demo.mp4).)*
 
 ---
 
