@@ -4,6 +4,22 @@ This repository contains the complete firmware, hardware documentation, digital 
 
 ---
 
+## 📸 Gallery & Demo
+
+Meet **PAW** — the physical build of this project, 3D-printed and assembled on the bench:
+
+<p align="center">
+  <img src="media/paw_front_view.jpg" alt="PAW bipedal robot - front view" width="45%" />
+  <img src="media/paw_top_view.jpg" alt="PAW bipedal robot - top view with gripper" width="45%" />
+</p>
+
+*Left: front view showing the two articulated Dynamixel-driven legs, wheel motors, and the 3D-printed chassis with carry handle. Right: top-down view of the chassis, showing the parallel-link leg mechanism and the orange gripper arms mounted at the front.*
+
+**🎥 Demo video:** a short clip of PAW balancing and moving under its own control loop.
+[**▶️ Watch on Google Drive**](https://drive.google.com/file/d/1A6eR97t5H_khKykf_Axxi-ui6EwEtNq_/view?usp=sharing) *(streams inline — recommended)*, or [download the raw file](media/paw_demo.mp4) straight from the repo.
+
+---
+
 ## 🤖 About the Robot
 
 The Self-Balancing Bipedal Robot is a dynamic robotics platform balancing on two wheels attached to articulated, servo-driven legs:
