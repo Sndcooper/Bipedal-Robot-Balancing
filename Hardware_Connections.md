@@ -12,6 +12,13 @@ This document outlines the complete hardware wiring and electrical pinouts for t
 * **AX-12+ Smart Servos:** 11.1V – 12.0V DC (Dedicated high-current LiPo battery).
 * **DC Motor Driver (L298N / TB6612FNG):** 12.0V DC to `VCC`/`VMOT`.
 * **STM32 Bluepill:** 5.0V (via 5V pin from BEC step-down) or 3.3V logic.
+  > **Flash note:** the C8T6 silkscreen marks the chip as 64 KB, but the die is
+  > identical to the CB variant and has 128 KB of working flash — the
+  > `bluepill_f103c8` PlatformIO board file just under-declares it. Newer
+  > firmware variants (`mcu_ik_engine_pretest_wireless`,
+  > `mcu_balance_fusion_wireless`) set `board = genericSTM32F103CB` in
+  > `platformio.ini` to unlock the real capacity. If a specific board is ever
+  > confirmed to be a genuine 64 KB die, revert that variant to `bluepill_f103c8`.
 * **MPU6050 IMU:** 3.3V (VCC pin connected to 3.3V logic supply).
 * **3DR Telemetry Radio:** 3.3V / 5V VCC to radio module.
 * **FlySky FS-iA10B Receiver:** 5V supply from BEC / motor driver 5V rail.
@@ -24,7 +31,7 @@ The STM32 Bluepill utilizes all three hardware serial peripherals for dedicated 
 
 ```
   ┌─────────────────────────────────────────────────────────────────────────┐
-  │                            STM32F103C8T6                                │
+  │                    STM32F103C8T6 (128 KB die, see note)                 │
   │                                                                         │
   │  [USART1]  PA9 (TX1) / PA10 (RX1) ───►  FlySky FS-iA10B iBUS (115.2k)    │
   │                                         OR USB-FTDI Serial (500k wired) │
@@ -50,7 +57,11 @@ Dynamixel AX-12+ uses a half-duplex UART bus at **1,000,000 baud (1 Mbaud)**:
 ### C. USART3 (`PB10` / `PB11`) — 3DR Wireless Telemetry Radio
 * **PB10 (TX3):** Connect to 3DR Telemetry Radio **RX** @ **115,200 baud**.
 * **PB11 (RX3):** Connect to 3DR Telemetry Radio **TX** @ **115,200 baud**.
-* Uses pipe (`|`) frame terminator and dynamic non-blocking buffer draining ($\text{avail}/5$, capped at 20 bytes/tick).
+* Dynamic non-blocking buffer draining ($\text{avail}/5$, capped at 20 bytes/tick), shared by all variants.
+* **Frame format differs by variant** — pins/baud are identical, the protocol is not:
+  * `mcu_ik_engine_*` / `mcu_balance_fusion_wireless` (comma family): `\n`-terminated, `key:value` comma-separated (`PITCH:1.23,PID_OUT:0.5,...`).
+  * `RC_mcu_IK_wireless` (flagship): pipe (`|`) terminated, `key<value>` space-separated (`P1.23 O0.5 ...|`), also accepts `\n`.
+  * See `serial-protocol` skill / `Balance_Rework/tuner_legcontrol/` before touching telemetry or command parsing in either family.
 
 ---
 
