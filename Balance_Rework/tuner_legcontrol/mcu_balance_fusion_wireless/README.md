@@ -6,9 +6,9 @@ This directory starts as a **copy of the validated single-loop baseline**
 pitch/velocity estimation via sensor fusion (encoder + IMU), on top of the
 same proven AX-12 leg bus, SYNC_WRITE, and telemetry guarding.
 
-> Nothing below has diverged from the baseline yet -- this is the starting
-> point, not a description of what has been built. Update this README as
-> fusion work lands.
+> Current implementation: STM32F401CD Black Pill, ST-Link upload, a 100 Hz
+> inner pitch PID, and an opt-in encoder position-hold PD outer loop.
+> See [the current wiring guide](../HARDWARE_CONNECTIONS_STM32F401_BLACK_PILL.md).
 
 > **History:** this folder previously held a pure 3DR radio latency benchmark.
 > That role is preserved — the firmware still answers `PING:<token>` with
@@ -18,13 +18,14 @@ same proven AX-12 leg bus, SYNC_WRITE, and telemetry guarding.
 
 ---
 
-## STATUS: finished, working single-loop balancer (frozen baseline)
+## Status: position-hold test build
 
 This variant balances the robot untethered on 3DR radio and is the validated
-reference before Stage 2 (sensor fusion / cascade). Board: **genericSTM32F103CB**
-(the C8T6 die is 128 KB; the C8 board file under-declares it — see below).
+reference before Stage 2. The active board is **genericSTM32F401CD**, uploaded
+through ST-Link.
 
-**Known-good gains** (from real bench sessions, auto-trim ON):
+**Historical inner-loop observations** (support-contaminated; do not treat as
+validated free-standing gains):
 
 | Kp | Ki | Kd | alpha | ATE | result |
 | --: | --: | --: | --: | :--: | --- |
@@ -32,10 +33,10 @@ reference before Stage 2 (sensor fusion / cascade). Board: **genericSTM32F103CB*
 | 70 | 729.5 | 3.10 | 0.96 | **1** | pitch sd 1.27 deg |
 | 85 | 666.5 | 3.34 | 0.96 | 0 | sd 2.31 deg, saturated 4.2% -- usable but rougher |
 
-**Run with auto-trim (`TE1`) on.** Every `ATE:0` session in the tuning logs
-ended in `SAFETY:CUTOFF`; every `ATE:1` session survived. Let `trim_bias`
-settle (~10-15 s) before committing with `TC` -- committing early bakes in a
-half-converged bias permanently.
+Tune the inner pitch PID with Position Hold off first. Once the robot can
+balance without hand support, enable Position Hold; enabling it captures the
+current encoder position as the target. Use Set Hold Point after manually
+moving the robot.
 
 **Fixed this round** (see `firmware/src/main.cpp` diff at commit `5847bdd`):
 - Crouch (`CR<mm>`) now routes through the interpolated trajectory engine --
@@ -47,16 +48,14 @@ half-converged bias permanently.
 - `initAX12Legs()` now applies the live compliance/torque globals instead of
   frozen struct defaults, so an `SR` reset no longer silently discards slider
   settings.
-- Flash headroom: was at 99.4% of the declared 64 KB; `genericSTM32F103CB`
-  unlocks the real 128 KB (now 49.7%).
+- The STM32F401CD build currently uses about 16.5% of its 384 KB flash.
 
-**Known issues to carry into Stage 2, not re-discover:**
-- `MAX_INTEGRAL_PWM = 1200` is 4.7x the actual PWM range (+/-255) -- anti-windup
-  in name only. One logged session pinned it at the clamp.
+**Known issues not to re-discover:**
+- The former `MAX_INTEGRAL_PWM = 1200` clamp was ineffective. It is now 64
+  PWM so the pitch integrator leaves actuator headroom.
 - `Kp` around 85-95 is only linear to +/-2.7-3.0 deg pitch; ~15% of logged
-  samples exceeded that and saturated the motors. A velocity/tilt-bias cascade
-  (Stage 2) should let `Kp` drop and widen the linear range instead of relying
-  on auto-trim to save it.
+  samples exceeded that and saturated the motors. Do not use Position Hold to
+  hide an unstable inner pitch tune.
 - **No persistence.** A board reset (brownout suspected -- motor + servo
   stall current on a shared rail) silently reverts `Kp/Ki/Kd/pitchOffset` to
   compiled defaults while the GUI keeps displaying stale values. Confirm via
@@ -69,7 +68,7 @@ half-converged bias permanently.
 
 ```
                     ┌───────────────────────────┐
-                    │   STM32F103C8T6 BLUEPILL  │
+                    │    STM32F401CD BLACK PILL │
                     ├───────────────────────────┤
   L298N Motor ENA   │ PA1                   PA6 │ Left Encoder A (Interrupt)
   L298N Motor ENB   │ PA0                   PA7 │ Left Encoder B
@@ -78,46 +77,55 @@ half-converged bias permanently.
   L298N Motor IN3   │ PB12                  PB6 │ MPU6050 SCL (I2C1)
   L298N Motor IN4   │ PB13                  PB7 │ MPU6050 SDA (I2C1)
                     │                           │
- AX-12 Bus TX (1M)  │ PA2                  PB10 │ 3DR Radio TX (Serial3 @ 115k)
- AX-12 Bus RX (1M)  │ PA3                  PB11 │ 3DR Radio RX (Serial3 @ 115k)
+ AX-12 Bus TX (1M)  │ PA2                   PA9 │ 3DR Radio TX (USART1 @ 115k)
+ AX-12 Bus RX (1M)  │ PA3                  PA10 │ 3DR Radio RX (USART1 @ 115k)
                     └───────────────────────────┘
 ```
 
-Encoders feed **velocity telemetry for display only** — velocity is never used
-in the control law (that would make it more than one loop).
+Encoders provide both the position error and velocity damping used by the
+outer position-hold loop.
 
 ---
 
-## 🎛️ Control — strictly one PID loop
+## 🎛️ Control — inner PID plus outer position PD
 
 ```
-error  = targetAngle - pitch
-output = Kp*error + Ki*integral + Kd*(-gyroRate)      # derivative on measurement
-setMotors(-output, -output)                            # no steering, pure balance
+positionError = holdPoint - averageEncoderPosition
+desiredLean   = Kp_pos*positionError - Kp_vel*wheelVelocity
+leanCommand   = clampAndSlewLimit(desiredLean, +/-3 deg, 3 deg/s)
+pitchError    = (targetAngle + leanCommand) - pitch
+output        = Kp*pitchError + Ki*integral + Kd*(-gyroRate)
+setMotors(-output, -output)
 ```
 
 - Integrator state is anti-windup clamped to `MAX_INTEGRAL_PWM/Ki`; with `Ki=0`
   the integral is held at zero so no latent kick can bank up.
 - Safety cutoff: if `|pitch| > maxSafeTilt` while armed, motors latch OFF until an
   explicit re-arm (`M`).
-- `alpha` (complementary filter), `targetAngle` (setpoint), `maxSafeTilt` (safety)
-  and the IMU offset are tunable but are **not** additional control loops.
+- Position Hold is opt-in and captures the current position when enabled.
+- `Kp_pos` controls return strength; `Kp_vel` controls braking/damping.
+- The outer loop has no integral, so physical support cannot bank a hidden
+  integral kick.
 
 ---
 
 ## 📡 Protocol (comma/colon, newline-terminated)
 
-**Telemetry @ 20 Hz** (parsed by `gui/serial_link.py`):
+**Telemetry @ 10 Hz** (parsed by `gui/serial_link.py`):
 ```text
-PITCH:<p>,PID_OUT:<o>,INT:<i>,EL:<encL>,ER:<encR>,VEL:<v>,MOT:<0|1>,TILT:<t>,LATCH:<0|1>
+PITCH:<p>,PID_OUT:<o>,INT:<i>,EL:<encL>,ER:<encR>,VEL:<v>,POS:<p>,PERR:<e>,TRIM:<lean>,ATE:<hold>
 SRV:<id>,<temp>,<load%>            # one servo per frame, round-robin
 ```
-**Command ack:** `Updated -> P:.. I:.. D:.. Offset:.. Target:.. Alpha:.. Tilt:..`
+**Command ack:** `Updated -> ... PosP:.. VelD:..`
 **Calibration:** `CAL:START` … `CAL:DONE,OFFSET:..`
 
 | Command | Meaning |
 | :--- | :--- |
-| `P<f>` `I<f>` `D<f>` | Balance PID gains (the one loop) |
+| `P<f>` `I<f>` `D<f>` | Inner balance PID gains |
+| `PP<f>` | Position-hold strength, degrees per encoder count |
+| `VP<f>` | Velocity damping, degrees per count/second |
+| `TE0` / `TE1` | Position Hold off/on; enabling captures current position |
+| `HZ` | Capture the current position as the new hold point |
 | `S<f>` | Balance setpoint / operator trim |
 | `A<f>` | Complementary-filter `alpha` |
 | `T<f>` | Max safe tilt |
@@ -130,9 +138,9 @@ SRV:<id>,<temp>,<load%>            # one servo per frame, round-robin
 
 ## 📂 File Map
 
-* **[`firmware/src/main.cpp`](firmware/src/main.cpp)**: single-loop balancer — MPU6050 complementary filter, one PID, L298N motors, safety cutoff, AX-12 leg hold + health poll, PING/PONG.
-* **[`gui/main_gui.py`](gui/main_gui.py)**: single-screen balance + calibration GUI (telemetry plot, Kp/Ki/Kd/Target/alpha/Tilt, servo health, serial monitor).
-* **[`gui/serial_link.py`](gui/serial_link.py)**: 3DR telemetry worker (single-loop command/telemetry contract).
+* **[`firmware/src/main.cpp`](firmware/src/main.cpp)**: 100 Hz pitch PID plus encoder position-hold PD, L298N output, safety, and AX-12 leg hold.
+* **[`gui/main_gui.py`](gui/main_gui.py)**: inner/outer tuning sliders, position telemetry, servo health, and serial monitor.
+* **[`gui/serial_link.py`](gui/serial_link.py)**: 3DR command and telemetry transport.
 * **[`latency_test.py`](latency_test.py)**: standalone PING/PONG latency + throughput benchmark (still supported).
 
 ---
@@ -140,7 +148,7 @@ SRV:<id>,<temp>,<load%>            # one servo per frame, round-robin
 ## 🚀 Running
 
 ```bash
-cd firmware && pio run -t upload      # BOOT0=1, reset, then BOOT0=0 to run
+cd firmware && pio run -t upload      # ST-Link over SWD; BOOT0 stays at 0
 python gui/main_gui.py                # connect to the 3DR COM port @ 115200
 ```
 

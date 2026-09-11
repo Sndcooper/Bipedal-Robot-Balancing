@@ -26,7 +26,8 @@ class SerialLink:
         # Historical telemetry (Tab 1 — balance loop)
         self.history = {
             "t": [], "pitch": [], "pid_out": [],
-            "vel": [], "enc_l": [], "enc_r": [], "integral": [], "trim": []
+            "vel": [], "pos": [], "pos_error": [],
+            "enc_l": [], "enc_r": [], "integral": [], "trim": []
         }
         self.start_time = time.time()
 
@@ -338,6 +339,8 @@ class SerialLink:
             self.history["pitch"].append(data.get("PITCH",   0.0))
             self.history["pid_out"].append(data.get("PID_OUT", 0.0))
             self.history["vel"].append(data.get("VEL",     0.0))
+            self.history["pos"].append(data.get("POS",     0.0))
+            self.history["pos_error"].append(data.get("PERR", 0.0))
             self.history["enc_l"].append(data.get("EL",      0.0))
             self.history["enc_r"].append(data.get("ER",      0.0))
             self.history["integral"].append(data.get("INT",     0.0))
@@ -455,7 +458,9 @@ class SerialLink:
             "P": "Kp", "I": "Ki", "D": "Kd",
             "Offset": "pitchOffset",
             "Target": "targetAngle", "Alpha": "alpha", "Tilt": "maxSafeTilt",
-            "TrimGain": "Ki_trim", "Crouch": "crouchOffset", "VP": "Kp_vel",
+            "PosP": "Kp_pos", "VelD": "Kp_vel",
+            "TrimGain": "Kp_pos", "VP": "Kp_vel",
+            "Crouch": "crouchOffset",
         }
         try:
             _, payload = line.split("->", 1)
@@ -513,12 +518,12 @@ class SerialLink:
     def set_offset(self, val): self._send(f"O{val}")
     def set_tilt(self, val):   self._send(f"T{val}")
 
-    def set_trim_gain(self, val):      self._send(f"TG{val}")
     def set_auto_trim(self, enabled):  self._send(f"TE{1 if enabled else 0}")
-    def commit_trim(self):             self._send("TC")
+    def set_position_p(self, val):     self._send(f"PP{val}")
+    def capture_hold_point(self):      self._send("HZ")
 
     def set_crouch(self, val):         self._send(f"CR{val}")
-    # Outer velocity-loop P gain: deg of lean per (count/s) of velocity error.
+    # Derivative/damping half of the outer position-hold controller.
     def set_vel_p(self, val):          self._send(f"VP{val}")
     def set_servo_position(self, servo_id, pos):
         self._send(f"PS{int(servo_id)} {int(pos)}")

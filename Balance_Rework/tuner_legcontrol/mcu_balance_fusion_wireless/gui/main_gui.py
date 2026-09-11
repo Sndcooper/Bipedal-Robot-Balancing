@@ -3,7 +3,7 @@ main_gui.py
 Unified Wireless Balance + AX-12 Tuner — 3DR telemetry edition.
 
 Three-tab Notebook:
-  1. Balance Tuner        — live telemetry plot, PID/filter/trim sliders, serial monitor
+  1. Balance Tuner        — inner pitch PID + outer position-hold tuning and telemetry
   2. AX-12 Tuner          — SYNC_WRITE servo control (0-350 raw sliders), foot IK targets,
                             compliance/speed settings, live kinematics twin, torque on/off
   3. Kinematics & Health  — live servo temp/load, raw per-servo position (0-1023 bypass)
@@ -52,10 +52,9 @@ PARAM_SPECS = [
     ParamSpec("targetAngle", "Target",  -20.0,  20.0, 0.1,   5.0,  0.01,   3,   0.0),
     ParamSpec("alpha",       "alpha",    0.80, 0.999, 0.001, 0.02, 0.0001, 4,  0.96),
     ParamSpec("maxSafeTilt", "Max Tilt", 5.0,  50.0, 0.1,   5.0,  0.01,   2,  25.0),
-    # Outer velocity loop. Kp_vel reacts to a push NOW; Ki_trim learns the
-    # standing CoM offset over ~10 s. Both output DEGREES OF LEAN, not PWM.
-    ParamSpec("Kp_vel",      "Vel P (lean)",0.0, 0.02, 0.0005, 0.002, 0.0001, 5, 0.0030),
-    ParamSpec("Ki_trim",     "Vel I (trim)",0.0, 0.03, 0.001,  0.003, 0.0001, 5, 0.0015),
+    # Outer position-hold PD. Both gains output degrees of requested lean.
+    ParamSpec("Kp_pos",      "Position Hold P", 0.0, 0.003, 0.0001, 0.0005, 0.00002, 5, 0.0008),
+    ParamSpec("Kp_vel",      "Velocity Damping",0.0, 0.005, 0.0001, 0.0005, 0.00002, 5, 0.0015),
     ParamSpec("crouchOffset","Crouch",   0.0,  80.0, 1.0,  10.0,  0.1,    1,   0.0),
 ]
 
@@ -237,7 +236,7 @@ class CoarseFineSlider(ttk.Frame):
 
 
 # ---------------------------------------------------------------------------
-# TAB 1: Balance Tuner — plot, PID/filter/trim sliders, serial monitor
+# TAB 1: Balance Tuner — pitch PID + position hold, plots, serial monitor
 # ---------------------------------------------------------------------------
 class BalanceTunerTab(ttk.Frame):
     def __init__(self, master, app):
@@ -267,7 +266,7 @@ class BalanceTunerTab(ttk.Frame):
         self.ax.grid(True, alpha=0.25)
         self.pitch_line,  = self.ax.plot([], [], color="#1f77b4", label="pitch")
         self.target_line, = self.ax.plot([], [], color="#2ca02c", ls="--", label="target")
-        self.trim_line,   = self.ax.plot([], [], color="#d62728", ls=":",  label="trim")
+        self.trim_line,   = self.ax.plot([], [], color="#d62728", ls=":",  label="outer lean")
         self.pid_line,    = self.ax2.plot([], [], color="#ff7f0e", alpha=0.9, label="pid_out")
         self.vel_line,    = self.ax2.plot([], [], color="#9467bd", alpha=0.6, label="vel")
         self.ax.set_ylabel("angle (°)")
@@ -321,7 +320,7 @@ class BalanceTunerTab(ttk.Frame):
         self.log_text = tk.Text(log_frame, height=8, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
 
-        tuning_frame = ttk.LabelFrame(self, text="Tuning  (balance PID + auto-trim + crouch)")
+        tuning_frame = ttk.LabelFrame(self, text="Tuning  (inner balance PID + outer position hold)")
         tuning_frame.grid(row=0, column=1, sticky="nsew")
         self.sliders = {}
         for spec in PARAM_SPECS:
@@ -369,7 +368,7 @@ class BalanceTunerTab(ttk.Frame):
         elif key == "targetAngle": lk.set_target(val)
         elif key == "alpha":       lk.set_alpha(val)
         elif key == "maxSafeTilt": lk.set_tilt(val)
-        elif key == "Ki_trim":     lk.set_trim_gain(val)
+        elif key == "Kp_pos":      lk.set_position_p(val)
         elif key == "Kp_vel":      lk.set_vel_p(val)
         elif key == "crouchOffset":lk.set_crouch(val)
 
@@ -402,8 +401,14 @@ class BalanceTunerTab(ttk.Frame):
 
             trim_hist = snap.get("trim", [])
             if trim_hist:
-                state = "auto" if app.link.auto_trim_on else "idle"
-                app.trim_var.set(f"Trim: {trim_hist[-1]:+.3f}° ({state})")
+                state = "hold" if app.link.auto_trim_on else "off"
+                pos_hist = snap.get("pos", [])
+                err_hist = snap.get("pos_error", [])
+                pos = pos_hist[-1] if pos_hist else 0.0
+                err = err_hist[-1] if err_hist else 0.0
+                app.trim_var.set(
+                    f"Outer:{trim_hist[-1]:+.2f}° Pos:{pos:+.0f} Err:{err:+.0f} ({state})"
+                )
         else:
             app.pitch_var.set("Angle: --°")
 
@@ -898,7 +903,7 @@ class BalanceApp(tk.Tk):
         self.pitch_var        = tk.StringVar(value="Angle: --°")
         self.offset_var       = tk.StringVar(value="Offset: --")
         self.offset_entry_var = tk.StringVar(value="0.0")
-        self.trim_var         = tk.StringVar(value="Trim: --")
+        self.trim_var         = tk.StringVar(value="Outer hold: --")
         self.auto_trim_var    = tk.BooleanVar(value=False)
         self._last_known_offset = None
 
@@ -945,10 +950,10 @@ class BalanceApp(tk.Tk):
 
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        ttk.Checkbutton(top, text="Auto-Trim", variable=self.auto_trim_var,
+        ttk.Checkbutton(top, text="Position Hold", variable=self.auto_trim_var,
                         command=self.toggle_auto_trim).pack(side=tk.LEFT, padx=2)
-        ttk.Button(top, text="Commit Trim", command=self.commit_trim).pack(side=tk.LEFT, padx=2)
-        ttk.Label(top, textvariable=self.trim_var, width=14).pack(side=tk.LEFT)
+        ttk.Button(top, text="Set Hold Point", command=self.capture_hold_point).pack(side=tk.LEFT, padx=2)
+        ttk.Label(top, textvariable=self.trim_var, width=37).pack(side=tk.LEFT)
 
         ttk.Button(top, text="💾 Save Params", command=self.save_params_with_comment).pack(side=tk.LEFT, padx=8)
         ttk.Button(top, text="Resync",      command=self.resync).pack(side=tk.LEFT, padx=2)
@@ -1004,10 +1009,10 @@ class BalanceApp(tk.Tk):
     def toggle_auto_trim(self):
         if self.link: self.link.set_auto_trim(self.auto_trim_var.get())
 
-    def commit_trim(self):
+    def capture_hold_point(self):
         if self.link:
-            self.link.commit_trim()
-            self.status_var.set("Trim commit sent")
+            self.link.capture_hold_point()
+            self.status_var.set("Current wheel position set as hold point")
 
     def set_manual_offset(self):
         if self.link:
