@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tuner Leg Control — Deep Control-System Analysis</title>
+  <style>
+    :root {
+      --bg: #08111d; --panel: #0f1c2e; --panel2: #13243a; --ink: #e8f0fb;
+      --muted: #99acc5; --line: #243a55; --cyan: #59d6e8; --blue: #78a9ff;
+      --green: #70e1a1; --amber: #ffc66d; --red: #ff7b86; --purple: #b99cff;
+      --shadow: 0 20px 50px rgba(0,0,0,.28); --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background:
+      radial-gradient(900px 560px at 15% -10%, #183d5c 0%, transparent 60%),
+      radial-gradient(700px 500px at 105% 20%, #302154 0%, transparent 60%), var(--bg);
+      font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .shell { width: min(1200px, calc(100% - 34px)); margin: 0 auto; }
+    header { padding: 54px 0 24px; }
+    .eyebrow { color: var(--cyan); letter-spacing: .14em; text-transform: uppercase; font-size: 12px; font-weight: 800; }
+    h1 { font-size: clamp(34px, 6vw, 68px); letter-spacing: -.055em; line-height: .98; margin: 12px 0 20px; max-width: 900px; }
+    h2 { font-size: 28px; letter-spacing: -.025em; margin: 0 0 16px; }
+    h3 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 0 0 12px; }
+    .lede { color: #bdd0e8; font-size: 18px; max-width: 920px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+    .pill { border: 1px solid var(--line); background: rgba(15,28,46,.72); border-radius: 999px; padding: 7px 12px; color: var(--muted); }
+    .pill strong { color: var(--ink); }
+    nav { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(16px); background: rgba(8,17,29,.82); border-block: 1px solid rgba(58,83,111,.55); }
+    nav .shell { display: flex; gap: 8px; overflow-x: auto; padding-block: 10px; scrollbar-width: none; }
+    nav a { color: var(--muted); padding: 7px 11px; white-space: nowrap; border-radius: 10px; font-size: 13px; font-weight: 700; }
+    nav a:hover { background: var(--panel2); color: var(--ink); text-decoration: none; }
+    main { padding: 34px 0 80px; }
+    section { scroll-margin-top: 75px; margin: 0 0 38px; }
+    .panel { background: linear-gradient(145deg, rgba(19,36,58,.94), rgba(12,24,40,.94)); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow); }
+    .verdict { border-color: #3c7390; padding: 30px; }
+    .verdict h2 { color: var(--cyan); }
+    .grid { display: grid; gap: 16px; }
+    .g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card { padding: 20px; border: 1px solid var(--line); background: rgba(15,28,46,.78); border-radius: 15px; }
+    .card p, .card li { color: #b8c8db; }
+    .sev { display: inline-flex; align-items: center; gap: 7px; border-radius: 999px; padding: 4px 9px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 12px; }
+    .sev::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+    .critical { color: var(--red); background: rgba(255,123,134,.12); }
+    .high { color: var(--amber); background: rgba(255,198,109,.12); }
+    .medium { color: var(--blue); background: rgba(120,169,255,.12); }
+    .good { color: var(--green); background: rgba(112,225,161,.12); }
+    .callout { border-left: 4px solid var(--amber); padding: 14px 16px; background: rgba(255,198,109,.08); border-radius: 0 12px 12px 0; color: #f3dbb2; }
+    .flow { display: grid; grid-template-columns: repeat(7, auto); align-items: center; justify-content: center; gap: 9px; overflow-x: auto; padding: 24px 8px; }
+    .node { min-width: 125px; text-align: center; background: #112741; border: 1px solid #315274; padding: 13px; border-radius: 12px; font-weight: 800; }
+    .arrow { color: var(--cyan); font-size: 22px; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    code { color: #d9e8ff; background: #091524; border: 1px solid #213650; padding: 2px 5px; border-radius: 6px; }
+    .formula { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; background: #091524; border: 1px solid var(--line); border-radius: 12px; padding: 15px; overflow-x: auto; color: #cfe0f8; }
+    .timeline { border-left: 2px solid #34506d; margin-left: 9px; padding-left: 25px; }
+    .commit { position: relative; margin: 0 0 24px; }
+    .commit::before { content: ''; position: absolute; left: -33px; top: 7px; width: 14px; height: 14px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 5px var(--bg); }
+    .commit.active::before { background: var(--red); }
+    .commit .hash { color: var(--cyan); font-family: ui-monospace, monospace; font-weight: 800; }
+    .commit .date { color: var(--muted); font-size: 13px; margin-left: 8px; }
+    .tag { display: inline-block; color: var(--muted); border: 1px solid var(--line); padding: 2px 7px; border-radius: 7px; font-size: 11px; margin-left: 6px; }
+    .metric { display: grid; grid-template-columns: 105px 1fr; gap: 10px; align-items: start; border-top: 1px solid var(--line); padding: 12px 0; }
+    .metric:first-child { border-top: 0; padding-top: 0; }
+    .metric b { color: var(--cyan); }
+    .metric span { color: #b8c8db; }
+    .priority { display: flex; gap: 14px; align-items: flex-start; padding: 17px 0; border-top: 1px solid var(--line); }
+    .priority:first-of-type { border-top: 0; }
+    .num { flex: 0 0 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--cyan); color: #06212b; font-weight: 950; }
+    .priority p { color: #b8c8db; margin: 3px 0 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    td { color: #c0cee0; }
+    ul { margin: 8px 0 0; padding-left: 19px; }
+    li { margin: 5px 0; }
+    details { border-top: 1px solid var(--line); padding: 14px 0; }
+    details:first-of-type { border-top: 0; }
+    summary { cursor: pointer; font-weight: 800; color: #dbe8fa; }
+    .checklist label { display: flex; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); color: #c4d2e3; cursor: pointer; }
+    .checklist label:first-child { border-top: 0; }
+    input[type=checkbox] { accent-color: var(--cyan); width: 17px; height: 17px; margin-top: 3px; }
+    .foot { color: var(--muted); font-size: 13px; text-align: center; margin-top: 30px; }
+    @media (max-width: 820px) { .g2, .g3 { grid-template-columns: 1fr; } .flow { justify-content: start; } h1 { font-size: 43px; } }
+    @media print { body { background: white; color: #172235; } nav { display:none; } .panel,.card { box-shadow:none; background:white; } .shell { width: 94%; } }
+  </style>
+</head>
+<body>
+  <header class="shell">
+    <div class="eyebrow">Engineering diagnosis · 11 September 2026</div>
+    <h1>Tuner Leg Control<br>Deep Analysis</h1>
+    <p class="lede">Repository history, hardware architecture, cascaded control behavior, GUI semantics, and serial-log evidence—distilled into the exact order of work needed to move from supported balancing to repeatable position recovery.</p>
+    <div class="meta">
+      <span class="pill"><strong>Focus:</strong> mcu_balance_fusion_wireless</span>
+      <span class="pill"><strong>Active controller change:</strong> 204e9ea</span>
+      <span class="pill"><strong>Loop rate:</strong> 100 Hz</span>
+      <span class="pill"><strong>Conclusion:</strong> architecture + saturation + test setup</span>
+    </div>
+  </header>
+
+  <nav><div class="shell">
+    <a href="#verdict">Verdict</a><a href="#commits">Git history</a><a href="#architecture">Architecture</a>
+    <a href="#evidence">Log evidence</a><a href="#pitch">Pitch/calibration</a><a href="#position">Position loop</a>
+    <a href="#focus">What to focus on</a><a href="#checklist">Test checklist</a>
+  </div></nav>
+
+  <main class="shell">
+    <section id="verdict" class="panel verdict">
+      <div class="sev critical">Primary diagnosis</div>
+      <h2>The robot is not failing because one PID number is wrong.</h2>
+      <p>The current Stage-2 firmware has a pitch PID inside a zero-velocity PI loop. It does <strong>not</strong> yet contain a position loop, so returning to the original location is impossible by design. When the outer loop is enabled, its ±6° lean authority is larger than the inner controller can reproduce without PWM saturation. When the chassis is held by hand, the physical feedback path is broken and both loops accumulate commands against the support.</p>
+      <div class="callout"><strong>Most important finding:</strong> several September 10 runs changed <code>VP</code> and <code>TG</code> while telemetry showed <code>ATE:0</code>. In that state the firmware forces <code>lean_cmd = 0</code>, so those gain changes did nothing.</div>
+    </section>
+
+    <section id="commits">
+      <h2>What Git says changed recently</h2>
+      <div class="panel timeline">
+        <div class="commit"><span class="hash">791207b</span><span class="date">2026-09-10</span><span class="tag">logs only</span><h3>Added 12 serial captures</h3><p>No controller source change. These logs are the evidence set showing saturation, mode confusion, and wheel-channel disagreement.</p></div>
+        <div class="commit active"><span class="hash">204e9ea</span><span class="date">2026-09-08</span><span class="tag">active Stage-2 change</span><h3>Velocity → lean cascade + inner integral clamp</h3><p>Added <code>Kp_vel</code>, <code>Ki_trim</code>, <code>lean_cmd</code>, ±6° clamping, and reduced the inner integral contribution from an ineffective 1200 PWM limit to 64 PWM. This is the source change directly responsible for the present Stage-2 behavior.</p></div>
+        <div class="commit"><span class="hash">6fe4559</span><span class="date">2026-09-08</span><span class="tag">scaffold</span><h3>Created mcu_balance_fusion_wireless</h3><p>Copied the validated pretest single-loop baseline to begin Stage 2.</p></div>
+        <div class="commit"><span class="hash">e42e966</span><span class="date">2026-09-08</span><h3>Documented the finished single-loop baseline</h3><p>This is the useful reference point for restoring and validating the inner balance controller before tuning outer loops.</p></div>
+        <div class="commit"><span class="hash">24f3a74</span><span class="date">2026-09-08</span><span class="tag">known-good baseline</span><h3>Clean balancing with serial evidence</h3><p>Best source for the original inner-loop gains and behavior.</p></div>
+        <div class="commit"><span class="hash">5847bdd → 805a615</span><span class="date">2026-09-07/08</span><h3>Servo health, echo handling, GUI backup, and smaller fixes</h3><p>These improved AX-12 handling and observability. The later logs still contain intermittent status/failure episodes, so legs should be frozen and verified during wheel-loop tuning.</p></div>
+        <div class="commit"><span class="hash">571df72 → 59f14f7</span><span class="date">2026-09-06/07</span><h3>100 Hz profiling and efficient AX-12 scheduling</h3><p>The timing work indicates adequate loop headroom. CPU timing is not the leading cause of the current jerk.</p></div>
+      </div>
+      <p class="foot">A later root documentation commit, 094e643, corrected hardware/USART documentation but did not change this controller.</p>
+    </section>
+
+    <section id="architecture">
+      <h2>Current hardware and control architecture</h2>
+      <div class="grid g3">
+        <div class="card"><div class="sev medium">Sensors</div><h3>MPU6050 + wheel encoders</h3><p>MPU6050 on PB6/PB7. Complementary-filter pitch uses accelerometer angle plus gyro Y. Single-channel interrupt decoding produces raw left/right counts with mirrored physical signs.</p></div>
+        <div class="card"><div class="sev medium">Actuation</div><h3>L298N + two JGA gearmotors</h3><p>Wheel PWM on PA1/PA0. Gearbox friction, L298N voltage loss, motor mismatch, and unmeasured breakaway PWM can turn small commands into stick-slip motion.</p></div>
+        <div class="card"><div class="sev medium">Legs + radio</div><h3>Four AX-12s + 3DR telemetry</h3><p>AX-12 bus on USART2 at 1 Mbps. 3DR radio on USART3 at 115200. Leg motion changes center of mass and must be held fixed during wheel tuning.</p></div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <div class="flow">
+          <div class="node">Encoder<br>velocity</div><div class="arrow">→</div>
+          <div class="node">Velocity PI<br><span class="mono">VP + TG</span></div><div class="arrow">→</div>
+          <div class="node">Lean target<br>±6°</div><div class="arrow">→</div>
+          <div class="node">Pitch PID<br><span class="mono">P + I + D</span></div>
+        </div>
+        <div class="formula">vel_error = 0 - vel_current
+lean_cmd = clamp(Kp_vel × vel_error + trim_bias, -6°, +6°)
+pitch_error = targetAngle + lean_cmd - pitch
+PWM = -clamp(Kp×error + Ki×integral - Kd×gyroRate, -255, +255)</div>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <h2>Evidence from the serial logs</h2>
+      <div class="grid g2">
+        <div class="card"><div class="sev critical">Saturation</div><h3><code>VP = 0.02</code> is far too aggressive</h3><p>A ±6° lean limit is reached at only 300 counts/s. The logs contain 500–760 counts/s and repeated ±6° trim, with pitch swinging roughly −9° to +7°. That is effectively bang-bang behavior.</p></div>
+        <div class="card"><div class="sev critical">Range mismatch</div><h3>Outer request exceeds inner authority</h3><p>At <code>Kp = 78</code>, proportional action alone reaches 255 PWM at 3.27° error. A 6° request implies 468 PWM before D or I. The outer loop is allowed to demand a state the inner loop cannot linearly produce.</p></div>
+        <div class="card"><div class="sev high">Integral behavior</div><h3>Inner I reaches its cap extremely quickly</h3><p>With <code>Ki = 650</code>, the integral-state limit is 64/650 = 0.09846 degree·seconds. The logs repeatedly show approximately ±0.0985. A 5° error reaches that cap in about 20 ms.</p></div>
+        <div class="card"><div class="sev high">Hidden yaw</div><h3>The averaged encoder signal hides disagreement</h3><p>One long run ends near left −14,397 and right −13,640 raw counts. The normalized forward average is only a few hundred counts, while the differential component is about 14,000 counts. The wheels can counter-rotate while the cascade thinks forward velocity is near zero.</p></div>
+        <div class="card"><div class="sev high">Mode ambiguity</div><h3>“Auto-Trim” disables both velocity P and I</h3><p><code>TE0</code> forces total lean command to zero. On September 10, multiple VP/TG changes happened while ATE was off. The GUI label suggests only the integrator is affected, which is incorrect.</p></div>
+        <div class="card"><div class="sev medium">Servo disturbances</div><h3>AX-12 health is secondary but real</h3><p>Temperatures are not excessive, but logs include nonzero status flags and high consecutive fail counts. An unexpected joint movement changes the plant, so resolve these separately from PID tuning.</p></div>
+      </div>
+    </section>
+
+    <section id="pitch" class="panel">
+      <h2>Why “calibrated pitch is standing” is misleading</h2>
+      <p>Calibration averages the accelerometer angle in the pose currently being held, stores it as the offset, and sets the filtered pitch to zero. A supported 2° lean therefore becomes the new 0°. The logs show offsets varying from roughly −0.50° to −1.84° over a short period, with another calibration near +8.79° followed by −1.29°.</p>
+      <div class="grid g2" style="margin-top:16px">
+        <div class="card"><div class="sev critical">Do not do this</div><h3>Rigid hand support</h3><p>The wheels move but the body cannot pitch naturally. Controllers integrate against your hand, wheel velocity rises, lean saturates, and releasing pressure produces a jerk.</p></div>
+        <div class="card"><div class="sev good">Use this instead</div><h3>Slack overhead catcher</h3><p>Place the robot at a measured physical upright, calibrate stationary with motors off, then let pitch, translation, and yaw move freely. The tether should act only after the robot is already falling.</p></div>
+      </div>
+    </section>
+
+    <section id="position">
+      <h2>The position-control issue</h2>
+      <div class="panel">
+        <p>The present fusion firmware requests zero velocity; it does not remember or restore a position. The correct eventual hierarchy is:</p>
+        <div class="flow">
+          <div class="node">Position P<br>slowest</div><div class="arrow">→</div>
+          <div class="node">Target velocity<br>limited</div><div class="arrow">→</div>
+          <div class="node">Velocity PI<br>slow</div><div class="arrow">→</div>
+          <div class="node">Lean target<br>±1…1.5° first</div>
+        </div>
+        <div class="formula">forwardPosition = 0.5 × (encL - encR)
+targetVelocity = clamp(Kp_pos × (targetPosition - forwardPosition), ±Vmax)</div>
+        <p style="margin-top:14px"><strong>Important repository bug:</strong> <code>mcu_pos_wireless</code> and <code>RC_mcu_IK_wireless</code> use <code>(encL + encR)/2</code>. With the established mirrored encoder signs, that is largely yaw, not forward position. The corrected subtraction already exists in <code>mcu_ik_engine_wireless</code>.</p>
+      </div>
+    </section>
+
+    <section id="focus">
+      <h2>What to focus on, in order</h2>
+      <div class="panel">
+        <div class="priority"><div class="num">1</div><div><h3>Make the experiment physically valid</h3><p>Freeze leg pose, use a slack tether, calibrate at measured upright with motors off, and stop holding the body during captures.</p></div></div>
+        <div class="priority"><div class="num">2</div><div><h3>Verify both drive channels</h3><p>Measure encoder counts/revolution, left/right normalized direction, minimum breakaway PWM in both directions, and motor response mismatch.</p></div></div>
+        <div class="priority"><div class="num">3</div><div><h3>Restore a trustworthy inner loop</h3><p>Velocity loop off. Use the known-good single-loop Kp/Kd baseline. Temporarily set pitch Ki to zero, tune PD without repeated saturation, then add only necessary integral.</p></div></div>
+        <div class="priority"><div class="num">4</div><div><h3>Tune velocity P alone</h3><p>Set <code>Ki_trim = 0</code>. Start <code>Kp_vel ≈ 0.0005–0.001</code>, limit lean to ±1° or ±1.5°, and add a lean slew-rate limit. Do not start at 0.02.</p></div></div>
+        <div class="priority"><div class="num">5</div><div><h3>Add conditional velocity integral</h3><p>Try a small value only after P works. Freeze/back-calculate integration whenever lean or PWM is saturated.</p></div></div>
+        <div class="priority"><div class="num">6</div><div><h3>Add position P last</h3><p>Use <code>(encL - encR)/2</code>, tightly limit target velocity, and keep the position bandwidth below the velocity bandwidth.</p></div></div>
+        <div class="priority"><div class="num">7</div><div><h3>Make the GUI and telemetry truthful</h3><p>Rename the mode, split P/I enables, synchronize live gains on connect, clamp parameters in firmware, and log raw pitch, gyro, both wheel speeds, controller terms, output, and saturation flags.</p></div></div>
+      </div>
+    </section>
+
+    <section id="checklist">
+      <h2>Next-run checklist</h2>
+      <div class="panel checklist">
+        <label><input type="checkbox"> Legs fixed; AX-12 errors/fail counts stable</label>
+        <label><input type="checkbox"> Slack tether only; no hand contact during capture</label>
+        <label><input type="checkbox"> Calibrated stationary at measured upright with motors off</label>
+        <label><input type="checkbox"> Left/right encoder directions and CPR verified</label>
+        <label><input type="checkbox"> Left/right breakaway PWM measured</label>
+        <label><input type="checkbox"> Inner-loop-only push test recorded first</label>
+        <label><input type="checkbox"> Velocity mode visibly enabled; <code>Ki_trim = 0</code></label>
+        <label><input type="checkbox"> Lean limited to ±1–1.5°; <code>VP ≤ 0.001</code> initially</label>
+        <label><input type="checkbox"> Run ≥20 seconds with one standardized gentle push</label>
+        <label><input type="checkbox"> Record peak pitch, settle time, displacement, PWM/lean saturation, and both wheels</label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Secondary code issues</h2>
+      <details open><summary>IMU robustness</summary><p>The code does not verify that all 12 MPU6050 bytes arrived before reading. It also does not calibrate gyro bias. The documentation says 400 kHz I²C, but setup only calls <code>Wire.begin()</code>.</p></details>
+      <details><summary>GUI synchronization</summary><p>On connect, the GUI requests servo state but not a complete balance-controller state. Slider defaults can therefore differ from the parameters actually running on the MCU.</p></details>
+      <details><summary>Telemetry bandwidth</summary><p>Control executes at 100 Hz while radio telemetry is about 10 Hz. Fast chatter and one-tick saturation are invisible. Use a short triggered 50–100 Hz diagnostic capture.</p></details>
+      <details><summary>Documentation drift</summary><p>The fusion README still describes encoder values as display-only and the controller as single-loop. The implementation changed in 204e9ea, so current source and logs must take precedence.</p></details>
+    </section>
+
+    <p class="foot">Generated from the current repository, recent Git history, firmware/GUI sources, hardware documentation, and available serial captures. No firmware files were modified.</p>
+  </main>
+</body>
+</html>

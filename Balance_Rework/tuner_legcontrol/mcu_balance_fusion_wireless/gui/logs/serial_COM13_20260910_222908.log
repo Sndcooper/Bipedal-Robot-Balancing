@@ -1,0 +1,16 @@
+================================================================================
+SERIAL MONITOR BACKUP LOG
+Port: COM13 | Baud: 115200
+Session Started: 2026-09-10 22:29:08
+Trigger Reason: Motors ENABLED
+Last IMU Calibration: Offset: -2.4097° (calibrated at 2026-09-10 22:22:36)
+Active FW Parameters: pitchOffset=-2.4097, Kp=50.8, Ki=277.5, Kd=3.52, targetAngle=1.5, alpha=0.96, maxSafeTilt=25.0, Ki_trim=0.03, crouchOffset=0.0, Kp_vel=0.02
+================================================================================
+[Timestamp]                [Dir]  Payload
+--------------------------------------------------------------------------------
+[2026-09-10 22:29:08.165] [RX] Motors ENABLED
+[2026-09-10 22:29:08.165] [RX] SAFETY:CUTOFF
+--------------------------------------------------------------------------------
+[2026-09-10 22:29:08.165] [SYS] Session Stopped: SAFETY CUTOFF
+Total Duration: 0.00s | Total Lines Captured: 2
+================================================================================
