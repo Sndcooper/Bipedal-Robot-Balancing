@@ -1,6 +1,6 @@
 // ============================================================================
 // mcu_balance_fusion_wireless — STAGE 2: SENSOR-FUSION BALANCER (copied from pretest_wireless v1)
-// STM32 Bluepill F103C8 | 3DR telemetry Serial3 (PB10/PB11 @ 115200)
+// STM32F401CD Black Pill | 3DR telemetry USART1 (PA9/PA10 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud) | MPU6050 I2C1 (PB6/PB7)
 // ----------------------------------------------------------------------------
 // Deliberately ONE control loop only: a single balance PID (Kp,Ki,Kd) acting on
@@ -15,6 +15,10 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+
+// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
+#define Serial3 Serial1
+extern HardwareSerial Serial6;
 
 // ── ENCODER PINS (velocity telemetry only — not used for control) ────────────
 #define ENC_L_A PA6
@@ -39,7 +43,7 @@ void countRight() { if (digitalRead(ENC_R_B)) encoderRight--; else encoderRight+
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
-extern HardwareSerial Serial1;   // tick profiler out (PA9 TX) — OUTPUT ONLY
+extern HardwareSerial Serial1;   // 3DR radio (PA9 TX / PA10 RX)
 extern HardwareSerial Serial2;   // AX-12 bus
 extern HardwareSerial Serial3;   // 3DR radio
 
@@ -51,7 +55,7 @@ extern HardwareSerial Serial3;   // 3DR radio
 // numbers therefore describe the firmware you already trust, which is the whole
 // point of measuring it rather than rewriting it.
 //
-// Output is Serial1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
+// Output is Serial6 (PA11 = TX) at 115200 — a plain wired UART, deliberately NOT
 // the 3DR radio. Sending profiling data over the link whose airtime starvation
 // you are trying to characterise would perturb the very thing being measured.
 //
@@ -712,7 +716,10 @@ void pollLegServosTask() {
 
 // ── IMU ───────────────────────────────────────────────────────────────────────
 void setupMPU() {
+  Wire.setSCL(PB6);
+  Wire.setSDA(PB7);
   Wire.begin();
+  Wire.setClock(400000);
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x6B);
   Wire.write(0);
@@ -1084,9 +1091,10 @@ void handleTelemetryRX() {
 
 // ── SETUP ─────────────────────────────────────────────────────────────────────
 void setup() {
+  analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial1.begin(115200);       // tick profiler out (PA9 = TX)
+  Serial6.begin(115200);       // tick profiler out (PA11 = TX)
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 
@@ -1112,8 +1120,8 @@ void setup() {
   Serial3.println("BOOT:OK");
 
   profResetWindow();
-  Serial1.println();
-  Serial1.println("# profiler: P period B body F free X overhead");
+  Serial6.println();
+  Serial6.println("# profiler: P period B body F free X overhead");
 }
 
 // ── MAIN LOOP (100 Hz) ────────────────────────────────────────────────────────
@@ -1323,7 +1331,7 @@ void loop() {
       if (profReportLine(pb, sizeof(pb))) {
         int n = (int)strlen(pb);
         pb[n++] = '\n';
-        if (Serial1.availableForWrite() >= n) { Serial1.write((uint8_t*)pb, n); prof_report++; }
+        if (Serial6.availableForWrite() >= n) { Serial6.write((uint8_t*)pb, n); prof_report++; }
       } else {
         prof_report = -1;
       }
@@ -1335,8 +1343,8 @@ void loop() {
       n += snprintf(pb + n, sizeof(pb) - n, " X%lu%s\n",
                     (unsigned long)prof_printUs,
                     (prof_body > 10000) ? " !OVR" : "");
-      if (n > 0 && n < (int)sizeof(pb) && Serial1.availableForWrite() >= n)
-        Serial1.write((uint8_t*)pb, n);
+      if (n > 0 && n < (int)sizeof(pb) && Serial6.availableForWrite() >= n)
+        Serial6.write((uint8_t*)pb, n);
       else if (prof_drop < 0xFFFF) prof_drop++;
     }
 

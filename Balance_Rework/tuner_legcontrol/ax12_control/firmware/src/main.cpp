@@ -1,6 +1,6 @@
 // ============================================================================
 // ax12_control — AX-12+ LEG SUBSYSTEM BENCH RIG (wireless)
-// STM32 Bluepill F103C8 | 3DR telemetry Serial3 (PB10/PB11 @ 115200)
+// STM32F401CD Black Pill | 3DR telemetry USART1 (PA9/PA10 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud)
 // ----------------------------------------------------------------------------
 // SERVOS ONLY. There is deliberately no IMU, no balance PID, no encoders and
@@ -31,6 +31,10 @@
 
 #include <Arduino.h>
 
+// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
+#define Serial3 Serial1
+extern HardwareSerial Serial6;
+
 // ── DRIVE MOTOR PINS (L298N) — FORCED OFF, NEVER DRIVEN ──────────────────────
 // Not used by this firmware. Declared solely so setup() can pin them LOW: a
 // floating enable on a powered L298N can latch a wheel on while you have both
@@ -43,7 +47,7 @@
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
-extern HardwareSerial Serial1;   // wired profiling port (PA9/PA10) — OUTPUT ONLY
+extern HardwareSerial Serial1;   // 3DR radio (PA9 TX / PA10 RX)
 extern HardwareSerial Serial2;   // AX-12 bus
 extern HardwareSerial Serial3;   // 3DR radio
 
@@ -70,7 +74,7 @@ void radioLine(const char *s) {
   if (Serial3.availableForWrite() >= n) Serial3.write((uint8_t *)buf, n);
 }
 
-// ── PROFILING — one raw sample per tick, out on Serial1 ──────────────────────
+// ── PROFILING — one raw sample per tick, out on Serial6 / PA11 ───────────────
 // The question this answers: how much of the 10 ms is actually being consumed,
 // and by what. Every segment of the loop body is timed separately with micros()
 // and emitted every single tick, unaggregated.
@@ -732,9 +736,10 @@ void handleTelemetryRX() {
 
 // ── SETUP ────────────────────────────────────────────────────────────────────
 void setup() {
+  analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial1.begin(115200);       // wired profiler port, PA9 = TX (output only)
+  Serial6.begin(115200);       // wired profiler port, PA11 = TX (output only)
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 
@@ -756,18 +761,18 @@ void setup() {
 
   // Legend for the raw per-tick rows. Printed once; setup() has no 10 ms
   // deadline so an unguarded blocking write is fine here.
-  Serial1.println();
-  Serial1.println("# ax12_control tick profiler - one row per 100 Hz tick, all us");
-  Serial1.println("#   P  tick period            (target 10000)");
-  Serial1.println("#   B  loop body total        <- budget consumed");
-  Serial1.println("#   F  free time left of 10000");
-  Serial1.println("#   R  handleTelemetryRX + parseCommand");
-  Serial1.println("#   S  applySettingsTask      (servo register writes)");
-  Serial1.println("#   U  AX-12 bus              (sync-write / poll TX+RX)");
-  Serial1.println("#   T  telemetry build+write  (Serial3)");
-  Serial1.println("#   L  servo read latency, request->reply (0 = none this tick)");
-  Serial1.println("#   X  profiler cost itself, previous tick");
-  Serial1.println("#   !OVR body exceeded 10000   !ERR servo timeout or dropped row");
+  Serial6.println();
+  Serial6.println("# ax12_control tick profiler - one row per 100 Hz tick, all us");
+  Serial6.println("#   P  tick period            (target 10000)");
+  Serial6.println("#   B  loop body total        <- budget consumed");
+  Serial6.println("#   F  free time left of 10000");
+  Serial6.println("#   R  handleTelemetryRX + parseCommand");
+  Serial6.println("#   S  applySettingsTask      (servo register writes)");
+  Serial6.println("#   U  AX-12 bus              (sync-write / poll TX+RX)");
+  Serial6.println("#   T  telemetry build+write  (Serial1 / 3DR)");
+  Serial6.println("#   L  servo read latency, request->reply (0 = none this tick)");
+  Serial6.println("#   X  profiler cost itself, previous tick");
+  Serial6.println("#   !OVR body exceeded 10000   !ERR servo timeout or dropped row");
 }
 
 // ── MAIN LOOP (100 Hz) ───────────────────────────────────────────────────────
@@ -878,8 +883,8 @@ void loop() {
 
     // Guarded exactly like the radio path — the profiler must never be the
     // thing that stalls the loop it is measuring.
-    if (n > 0 && n < (int)sizeof(pl) && Serial1.availableForWrite() >= n) {
-      Serial1.write((uint8_t *)pl, n);
+    if (n > 0 && n < (int)sizeof(pl) && Serial6.availableForWrite() >= n) {
+      Serial6.write((uint8_t *)pl, n);
       prof_rxTo = 0; prof_dropped = 0;
     } else {
       if (prof_dropped < 0xFFFF) prof_dropped++;

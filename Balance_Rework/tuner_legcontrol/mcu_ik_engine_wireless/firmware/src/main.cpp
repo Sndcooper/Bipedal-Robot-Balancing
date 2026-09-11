@@ -5,6 +5,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
+#define Serial3 Serial1
+
 // ── ENCODER PINS ─────────────────────────────────────────────────────────────
 #define ENC_L_A PA6
 #define ENC_L_B PA7
@@ -313,7 +316,10 @@ void pollLegServosTask() {
 
 // ── IMU ───────────────────────────────────────────────────────────────────────
 void setupMPU() {
+  Wire.setSCL(PB6);
+  Wire.setSDA(PB7);
   Wire.begin();
+  Wire.setClock(400000);
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x6B);
   Wire.write(0);
@@ -539,6 +545,7 @@ void handleTelemetryRX() {
 
 // ── SETUP ─────────────────────────────────────────────────────────────────────
 void setup() {
+  analogWriteResolution(8);
   delay(2000); // Allow AX-12 servos to stabilise before UART traffic starts
 
   Serial3.begin(115200); // 3DR radio
