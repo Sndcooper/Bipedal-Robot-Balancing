@@ -1,6 +1,6 @@
 // ============================================================================
 // mcu_balance_fusion_wireless — STAGE 2: SENSOR-FUSION BALANCER (copied from pretest_wireless v1)
-// STM32F401CD Black Pill | 3DR telemetry USART6 (PA11/PA12 @ 115200)
+// STM32F103C8 Blue Pill | 3DR telemetry USART3 (PB10/PB11 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud) | MPU6050 I2C1 (PB6/PB7)
 // ----------------------------------------------------------------------------
 // Two-loop position-hold controller: a fast pitch PID keeps the body upright;
@@ -13,9 +13,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// STM32F401 has no USART3. The telemetry protocol is mirrored to the 3DR radio
-// (USART6) and the wired FTDI console (USART1).
-extern HardwareSerial Serial6;
+// Blue Pill: the telemetry protocol is mirrored to the 3DR radio on USART3
+// (PB10 TX / PB11 RX) and the wired FTDI console on USART1 (PA9 TX / PA10 RX).
+extern HardwareSerial Serial3;
 extern HardwareSerial Serial1;
 
 class MirroredSerial : public Stream {
@@ -53,8 +53,14 @@ class MirroredSerial : public Stream {
   HardwareSerial &wired_;
 };
 
-MirroredSerial telemetry(Serial6, Serial1);
+MirroredSerial telemetry(Serial3, Serial1);
 #define Serial3 telemetry
+
+// The Blue Pill has no USART6 and no spare UART left: USART2 is the AX-12 bus,
+// USART3 is the radio, USART1 is the wired console. If the tick profiler is
+// switched on it therefore shares the wired console, interleaving profiler rows
+// with the mirrored telemetry. Keep ENABLE_TICK_PROFILER=0 for flight.
+#define Serial6 Serial1
 
 // ── ENCODER PINS (velocity telemetry only — not used for control) ────────────
 #define ENC_L_A PA6
@@ -89,7 +95,7 @@ extern HardwareSerial Serial2;   // AX-12 bus
 // numbers therefore describe the firmware you already trust, which is the whole
 // point of measuring it rather than rewriting it.
 //
-// Output is Serial6 (PA11 = TX) at 115200 — a plain wired UART, deliberately NOT
+// Output is USART1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
 // the 3DR radio. Sending profiling data over the link whose airtime starvation
 // you are trying to characterise would perturb the very thing being measured.
 //
@@ -1139,7 +1145,7 @@ void setup() {
   analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial3.begin(115200);       // USART6: 3DR radio on PA11 TX / PA12 RX
+  Serial3.begin(115200);       // mirror: 3DR USART3 (PB10/PB11) + FTDI USART1
   Serial2.begin(1000000);      // AX-12 bus
 
   initAX12Legs();

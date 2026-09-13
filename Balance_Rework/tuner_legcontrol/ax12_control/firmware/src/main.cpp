@@ -1,6 +1,6 @@
 // ============================================================================
 // ax12_control — AX-12+ LEG SUBSYSTEM BENCH RIG (wireless)
-// STM32F401CD Black Pill | 3DR telemetry USART1 (PA9/PA10 @ 115200)
+// STM32F103C8 Blue Pill | 3DR telemetry USART3 (PB10/PB11 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud)
 // ----------------------------------------------------------------------------
 // SERVOS ONLY. There is deliberately no IMU, no balance PID, no encoders and
@@ -31,9 +31,10 @@
 
 #include <Arduino.h>
 
-// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
-#define Serial3 Serial1
-extern HardwareSerial Serial6;
+// STM32F103 Blue Pill: USART3 exists, so the 3DR radio goes back to its own
+// port (PB10 TX / PB11 RX) and USART1 is free again. The Blue Pill has no
+// USART6, so the wired profiler port moves to USART1 (PA9 TX / PA10 RX).
+#define Serial6 Serial1
 
 // ── DRIVE MOTOR PINS (L298N) — FORCED OFF, NEVER DRIVEN ──────────────────────
 // Not used by this firmware. Declared solely so setup() can pin them LOW: a
@@ -47,9 +48,9 @@ extern HardwareSerial Serial6;
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
-extern HardwareSerial Serial1;   // 3DR radio (PA9 TX / PA10 RX)
-extern HardwareSerial Serial2;   // AX-12 bus
-extern HardwareSerial Serial3;   // 3DR radio
+extern HardwareSerial Serial1;   // wired profiler console (PA9 TX / PA10 RX)
+extern HardwareSerial Serial2;   // AX-12 bus (PA2 TX / PA3 RX)
+extern HardwareSerial Serial3;   // 3DR radio (PB10 TX / PB11 RX)
 
 // ── LOOP TIMING ──────────────────────────────────────────────────────────────
 unsigned long lastTime      = 0;
@@ -74,7 +75,7 @@ void radioLine(const char *s) {
   if (Serial3.availableForWrite() >= n) Serial3.write((uint8_t *)buf, n);
 }
 
-// ── PROFILING — one raw sample per tick, out on Serial6 / PA11 ───────────────
+// ── PROFILING — one raw sample per tick, out on USART1 / PA9 ────────────────
 // The question this answers: how much of the 10 ms is actually being consumed,
 // and by what. Every segment of the loop body is timed separately with micros()
 // and emitted every single tick, unaggregated.
@@ -739,7 +740,7 @@ void setup() {
   analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial6.begin(115200);       // wired profiler port, PA11 = TX (output only)
+  Serial6.begin(115200);       // wired profiler port = USART1, PA9 TX
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 
@@ -769,7 +770,7 @@ void setup() {
   Serial6.println("#   R  handleTelemetryRX + parseCommand");
   Serial6.println("#   S  applySettingsTask      (servo register writes)");
   Serial6.println("#   U  AX-12 bus              (sync-write / poll TX+RX)");
-  Serial6.println("#   T  telemetry build+write  (Serial1 / 3DR)");
+  Serial6.println("#   T  telemetry build+write  (Serial3 / 3DR)");
   Serial6.println("#   L  servo read latency, request->reply (0 = none this tick)");
   Serial6.println("#   X  profiler cost itself, previous tick");
   Serial6.println("#   !OVR body exceeded 10000   !ERR servo timeout or dropped row");

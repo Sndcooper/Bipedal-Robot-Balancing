@@ -1,6 +1,6 @@
 // ============================================================================
 // mcu_ik_engine_pretest_wireless — MINIMAL SINGLE-LOOP WIRELESS BALANCER
-// STM32F401CD Black Pill | 3DR telemetry USART1 (PA9/PA10 @ 115200)
+// STM32F103C8 Blue Pill | 3DR telemetry USART3 (PB10/PB11 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud) | MPU6050 I2C1 (PB6/PB7)
 // ----------------------------------------------------------------------------
 // Deliberately ONE control loop only: a single balance PID (Kp,Ki,Kd) acting on
@@ -16,9 +16,10 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
-#define Serial3 Serial1
-extern HardwareSerial Serial6;
+// STM32F103 Blue Pill: USART3 exists, so the 3DR radio goes back to its own
+// port (PB10 TX / PB11 RX) and USART1 is free again. The Blue Pill has no
+// USART6, so the wired profiler port moves to USART1 (PA9 TX / PA10 RX).
+#define Serial6 Serial1
 
 // ── ENCODER PINS (velocity telemetry only — not used for control) ────────────
 #define ENC_L_A PA6
@@ -43,9 +44,9 @@ void countRight() { if (digitalRead(ENC_R_B)) encoderRight--; else encoderRight+
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
-extern HardwareSerial Serial1;   // 3DR radio (PA9 TX / PA10 RX)
-extern HardwareSerial Serial2;   // AX-12 bus
-extern HardwareSerial Serial3;   // 3DR radio
+extern HardwareSerial Serial1;   // wired profiler console (PA9 TX / PA10 RX)
+extern HardwareSerial Serial2;   // AX-12 bus (PA2 TX / PA3 RX)
+extern HardwareSerial Serial3;   // 3DR radio (PB10 TX / PB11 RX)
 
 // ============================================================================
 // TICK PROFILER — how much of the 10 ms is consumed, and by what
@@ -55,7 +56,7 @@ extern HardwareSerial Serial3;   // 3DR radio
 // numbers therefore describe the firmware you already trust, which is the whole
 // point of measuring it rather than rewriting it.
 //
-// Output is Serial6 (PA11 = TX) at 115200 — a plain wired UART, deliberately NOT
+// Output is USART1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
 // the 3DR radio. Sending profiling data over the link whose airtime starvation
 // you are trying to characterise would perturb the very thing being measured.
 //
@@ -1063,7 +1064,7 @@ void setup() {
   analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial6.begin(115200);       // tick profiler out (PA11 = TX)
+  Serial6.begin(115200);       // tick profiler out = USART1, PA9 TX
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 

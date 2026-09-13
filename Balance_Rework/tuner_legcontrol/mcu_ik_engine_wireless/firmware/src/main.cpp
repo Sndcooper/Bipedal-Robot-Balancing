@@ -5,8 +5,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
-#define Serial3 Serial1
+// STM32F103 Blue Pill: the 3DR radio has its own port, USART3
+// (PB10 TX / PB11 RX). No Serial3 remap is needed.
 
 // ── ENCODER PINS ─────────────────────────────────────────────────────────────
 #define ENC_L_A PA6

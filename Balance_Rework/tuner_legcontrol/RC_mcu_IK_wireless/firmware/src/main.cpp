@@ -6,8 +6,8 @@
 #include <IBusBM.h>
 #include <Wire.h>
 
-// USART1 remains the FlySky iBUS port. 3DR uses USART6 (PA11/PA12).
-#define Serial3 Serial6
+// STM32F103 Blue Pill: USART1 remains the FlySky iBUS port (PA10 RX) and the
+// 3DR radio uses its own USART3 (PB10 TX / PB11 RX). No Serial3 remap needed.
 
 IBusBM ibus;
 
