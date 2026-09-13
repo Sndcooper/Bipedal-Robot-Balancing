@@ -1652,8 +1652,35 @@ void loop() {
       // over the setpoint, not two fighting. (targetAngle is the operator's
       // trim, shared with the GUI slider and Ch8.)
       float vel_error = target_velocity - vel_current;  // counts/s
-      trim_bias += Ki_trim * vel_error * dt;
-      trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      // ── INTEGRATOR FREEZE WHILE DRIVING ────────────────────────────────
+      // trim_bias exists to learn the STANDING balance point (the CoM/mounting
+      // offset that used to need a hand re-trim). It is an integrator with a
+      // slow gain and a +-MAX_TRIM_BIAS clamp, both sized for the case this
+      // firmware originally had: target_velocity always 0, so any vel_error was
+      // a small drift to null out.
+      //
+      // A drive command breaks that assumption. The robot never tracks the
+      // commanded velocity exactly, so holding the stick leaves a LARGE
+      // sustained vel_error, and the integrator accumulates it without bound
+      // until it hits the clamp. Measured with the bench gains (Kp_vel 0.0115,
+      // Ki_trim 0.0020, RV150): at 40% velocity tracking trim_bias reaches the
+      // full +6 deg in about 20 s. Two things then go wrong:
+      //   1. lean_cmd saturates, so Kp_vel's push-rejection term is completely
+      //      masked and the robot stops responding to disturbances;
+      //   2. on stick release the decay is Ki_trim*vel_error = -0.3 deg/s, so
+      //      it takes ~20 SECONDS to unwind +6 deg. The operator centres the
+      //      stick and the robot keeps leaning and driving away from them.
+      //
+      // Freezing the integrator while a drive command is active is the standard
+      // cascade fix. Kp_vel still supplies the drive lean -- it is proportional,
+      // has no memory, and cannot wind up -- while trim_bias holds the standing
+      // trim it already learned instead of accumulating drive error into it.
+      // Stick release then settles on the Kp_vel timescale, i.e. immediately.
+      bool rc_driving = (fabsf(target_velocity) > 1.0f);
+      if (!rc_driving) {
+        trim_bias += Ki_trim * vel_error * dt;
+        trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      }
       lean_cmd   = (Kp_vel * vel_error) + trim_bias;
       lean_cmd   = constrain(lean_cmd, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
     } else {

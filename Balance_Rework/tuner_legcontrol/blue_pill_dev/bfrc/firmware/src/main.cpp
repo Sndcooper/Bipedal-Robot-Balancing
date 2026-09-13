@@ -186,7 +186,13 @@ void rcCalDefaults() {
 }
 
 // How far the sticks are allowed to command.
-float RC_MAX_VEL   = 400.0f;  // counts/sec at full Ch3 drive pot   — RV cmd
+// 150, not 400. With the bench-validated Kp_vel of ~0.0115 deg per (count/s),
+// a 400 c/s demand asks the outer loop for 0.0115 x 400 = 4.6 deg of lean —
+// 77% of the +-6 deg MAX_TRIM_BIAS clamp — so the loop saturates the moment the
+// stick leaves centre and the robot lurches instead of accelerating. 150 c/s
+// asks for 1.7 deg and leaves 4.3 deg of headroom for trim_bias and real
+// disturbances. Raise with RV once it drives cleanly.
+float RC_MAX_VEL   = 150.0f;  // counts/sec at full Ch3 drive pot   — RV cmd
 float RC_MAX_STEER = 40.0f;   // PWM counts at full Ch4 steer pot   — RS cmd
 float RC_MAX_CROUCH = 40.0f;  // mm of crouch travel (Ch10 limit)   — RCM cmd
 
@@ -201,9 +207,15 @@ float RC_MAX_CROUCH = 40.0f;  // mm of crouch travel (Ch10 limit)   — RCM cmd
 //   full deflection -> RC_TARGET_RATE_MAX (100 counts/sec)
 // and the mapping is SQUARED so the low half of the pot's travel is finer
 // still — a linear map makes the first few degrees of pot feel jumpy.
-float RC_TARGET_RATE_MIN =  10.0f;   // counts/sec just off centre  — RTN cmd
-float RC_TARGET_RATE_MAX = 100.0f;   // counts/sec at full pot      — RTX cmd
-float RC_TARGET_LIMIT    = 5000.0f;  // clamp on the accumulated target — RTL
+// UNITS ARE DEGREES/SEC, and that is a deliberate change from the original
+// bfrc values (10..100 "counts"/sec, clamp 5000). Ch8 now drives targetAngle —
+// the same variable the GUI's "Target" slider sets with S<f> — because that is
+// what the operator means by "the target". The old numbers would be lethal on a
+// pitch setpoint: 100 deg/sec slews past the 25 deg safety cutoff in a quarter
+// of a second, and a 5000 deg clamp is 250x the slider's own range.
+float RC_TARGET_RATE_MIN =  0.5f;   // deg/sec just off centre     — RTN cmd
+float RC_TARGET_RATE_MAX =  5.0f;   // deg/sec at full pot         — RTX cmd
+float RC_TARGET_LIMIT    = 20.0f;   // clamp on targetAngle, deg   — RTL cmd
 
 // The accumulated position target Ch8 drives. Zeroed by the Ch6 button.
 float rc_target = 0.0f;
@@ -1460,11 +1472,15 @@ void readRC() {
   if (integ_dt > 0.5f) integ_dt = RC_POLL_INTERVAL_MS * 1.0e-3f;   // stale gap
   rcLastIntegMs = nowMs;
 
+  // Ch8 -> targetAngle, in degrees. rc_target is kept as a mirror purely so the
+  // existing telemetry field and the Ch6 zero button keep working; targetAngle
+  // is the variable the control law actually reads.
   rc_targetAxis = rcAxisCal(rc_raw[7], 7);
   if (rc_targetAxis != 0.0f) {
-    rc_target += rcRateFromAxis(rc_targetAxis,
-                                RC_TARGET_RATE_MIN, RC_TARGET_RATE_MAX) * integ_dt;
-    rc_target = constrain(rc_target, -RC_TARGET_LIMIT, RC_TARGET_LIMIT);
+    targetAngle += rcRateFromAxis(rc_targetAxis,
+                                  RC_TARGET_RATE_MIN, RC_TARGET_RATE_MAX) * integ_dt;
+    targetAngle = constrain(targetAngle, -RC_TARGET_LIMIT, RC_TARGET_LIMIT);
+    rc_target   = targetAngle;
   }
 
   // Drive pot -> velocity setpoint for the outer loop. Only while armed; a pot
@@ -1496,7 +1512,11 @@ void readRC() {
       trim_bias     = 0.0f;
       vel_current   = 0.0f;
       target_velocity = 0.0f;
-      rc_target     = 0.0f;           // arming starts from a clean target
+      // targetAngle is deliberately NOT reset on arm: it is the operator's
+      // balance trim, set from the GUI slider or Ch8, and arming should honour
+      // it rather than silently discard it. (It used to zero rc_target here,
+      // which was harmless only because nothing consumed that variable.)
+      rc_target     = targetAngle;    // keep the telemetry mirror consistent
       encoderLeft = 0; encoderRight = 0;
       prevEncoderLeft = 0; prevEncoderRight = 0;
       Serial3.println("Motors ENABLED");   // same string the GUI already parses
@@ -1526,7 +1546,8 @@ void readRC() {
   if (rc_raw[5] > 0) {
     bool zeroSwitch = rcSwitchHigh(rc_raw[5], 5);
     if (zeroSwitch && !rcPrevZero) {
-      rc_target       = 0.0f;
+      targetAngle     = 0.0f;   // the variable the control law reads
+      rc_target       = 0.0f;   // telemetry mirror
       target_velocity = 0.0f;
       trim_bias       = 0.0f;
       encoderLeft = 0; encoderRight = 0;
@@ -1554,20 +1575,50 @@ void readRC() {
   // on every poll would continuously restart the move and the legs would never
   // arrive. Integrating a rate and only re-issuing the move when the value has
   // moved more than the hysteresis keeps the trajectory engine happy.
+  // Last crouch actually HANDED to the trajectory engine. The re-issue
+  // hysteresis is measured against THIS, not against the live accumulator.
+  //
+  // THE BUG THIS FIXES: the old code seeded newL from crouchOffsetL, added one
+  // tick's step, then tested `fabsf(newL - crouchOffsetL) > 0.5f`. That
+  // difference is BY CONSTRUCTION exactly one step — 0.25 mm at 25 mm/s on a
+  // 10 ms tick — so it never cleared 0.5 mm, the assignment never ran, and
+  // every increment was discarded. Crouch was a dead control: the pot read
+  // correctly, the rate computed correctly, and the result went in the bin
+  // 100 times a second. Accumulate unconditionally; rate-limit only the call.
+  static float lastIssuedCrouchL = 0.0f;
+  static float lastIssuedCrouchR = 0.0f;
+
   rc_crouchAxis = rcAxisCal(rc_raw[9], 9);
   if (rc_crouchAxis != 0.0f) {
     float step = rcRateFromAxis(rc_crouchAxis, RC_CROUCH_RATE * 0.2f,
                                 RC_CROUCH_RATE) * integ_dt;
-    float newL = crouchOffsetL, newR = crouchOffsetR;
-    if (rc_legSel == 0)      { newL += step; newR += step; }   // mirrored
-    else if (rc_legSel == 1) { newL += step; }                 // left only
-    else                     { newR += step; }                 // right only
-    newL = constrain(newL, 0.0f, RC_MAX_CROUCH);
-    newR = constrain(newR, 0.0f, RC_MAX_CROUCH);
-    // Hysteresis: only disturb the trajectory engine on a meaningful change.
-    if (fabsf(newL - crouchOffsetL) > 0.5f || fabsf(newR - crouchOffsetR) > 0.5f) {
-      crouchOffsetL = newL;
-      crouchOffsetR = newR;
+    if (rc_legSel == 0)      { crouchOffsetL += step; crouchOffsetR += step; }
+    else if (rc_legSel == 1) { crouchOffsetL += step; }
+    else                     { crouchOffsetR += step; }
+    // Clamped independently so driving one leg to its limit does not consume
+    // the other's remaining travel.
+    crouchOffsetL = constrain(crouchOffsetL, 0.0f, RC_MAX_CROUCH);
+    crouchOffsetR = constrain(crouchOffsetR, 0.0f, RC_MAX_CROUCH);
+
+    // Re-issue the move only once the commanded pose has drifted a meaningful
+    // distance from what the engine is already interpolating toward.
+    // startPoseMove() RESTARTS that interpolation, so calling it every tick
+    // from a moving pot would keep resetting the move and the legs would creep
+    // or stall. 0.5 mm at 25 mm/s re-issues about every 20 ms.
+    if (fabsf(crouchOffsetL - lastIssuedCrouchL) > 0.5f ||
+        fabsf(crouchOffsetR - lastIssuedCrouchR) > 0.5f) {
+      lastIssuedCrouchL = crouchOffsetL;
+      lastIssuedCrouchR = crouchOffsetR;
+      if (poseMode == MODE_CROUCH) startPoseMove();
+    }
+  } else {
+    // Pot returned to centre. Flush the accumulated remainder to the engine so
+    // the legs finish arriving at the last commanded depth instead of stopping
+    // up to 0.5 mm short of it.
+    if (fabsf(crouchOffsetL - lastIssuedCrouchL) > 0.01f ||
+        fabsf(crouchOffsetR - lastIssuedCrouchR) > 0.01f) {
+      lastIssuedCrouchL = crouchOffsetL;
+      lastIssuedCrouchR = crouchOffsetR;
       if (poseMode == MODE_CROUCH) startPoseMove();
     }
   }
@@ -1689,8 +1740,35 @@ void loop() {
     // targetAngle: one authority over the setpoint, not two fighting.
     if (autoTrimEnabled) {
       float vel_error = target_velocity - vel_current;  // counts/s
-      trim_bias += Ki_trim * vel_error * dt;
-      trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      // ── INTEGRATOR FREEZE WHILE DRIVING ────────────────────────────────
+      // trim_bias exists to learn the STANDING balance point (the CoM/mounting
+      // offset that used to need a hand re-trim). It is an integrator with a
+      // slow gain and a +-MAX_TRIM_BIAS clamp, both sized for the case this
+      // firmware originally had: target_velocity always 0, so any vel_error was
+      // a small drift to null out.
+      //
+      // A drive command breaks that assumption. The robot never tracks the
+      // commanded velocity exactly, so holding the stick leaves a LARGE
+      // sustained vel_error, and the integrator accumulates it without bound
+      // until it hits the clamp. Measured with the bench gains (Kp_vel 0.0115,
+      // Ki_trim 0.0020, RV150): at 40% velocity tracking trim_bias reaches the
+      // full +6 deg in about 20 s. Two things then go wrong:
+      //   1. lean_cmd saturates, so Kp_vel's push-rejection term is completely
+      //      masked and the robot stops responding to disturbances;
+      //   2. on stick release the decay is Ki_trim*vel_error = -0.3 deg/s, so
+      //      it takes ~20 SECONDS to unwind +6 deg. The operator centres the
+      //      stick and the robot keeps leaning and driving away from them.
+      //
+      // Freezing the integrator while a drive command is active is the standard
+      // cascade fix. Kp_vel still supplies the drive lean -- it is proportional,
+      // has no memory, and cannot wind up -- while trim_bias holds the standing
+      // trim it already learned instead of accumulating drive error into it.
+      // Stick release then settles on the Kp_vel timescale, i.e. immediately.
+      bool rc_driving = (fabsf(target_velocity) > 1.0f);
+      if (!rc_driving) {
+        trim_bias += Ki_trim * vel_error * dt;
+        trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      }
       lean_cmd   = (Kp_vel * vel_error) + trim_bias;
       lean_cmd   = constrain(lean_cmd, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
     } else {
