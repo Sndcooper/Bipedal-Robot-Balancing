@@ -39,175 +39,184 @@ void countRight() { if (digitalRead(ENC_R_B)) encoderRight--; else encoderRight+
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
-extern HardwareSerial Serial1;   // tick profiler out (PA9 TX) — OUTPUT ONLY
+extern HardwareSerial Serial1;   // FlySky iBUS in (PA10 RX) — INPUT ONLY
 extern HardwareSerial Serial2;   // AX-12 bus
 extern HardwareSerial Serial3;   // 3DR radio
 
 // ============================================================================
-// TICK PROFILER — how much of the 10 ms is consumed, and by what
+// RC RECEIVER — FlySky FS-iA10B over iBUS on Serial1 (PA10 RX)
 // ----------------------------------------------------------------------------
-// INSTRUMENTATION ONLY. Not one line of control logic below is altered by this
-// block: no stage is reordered, no timing is changed, nothing is optimised. The
-// numbers therefore describe the firmware you already trust, which is the whole
-// point of measuring it rather than rewriting it.
+// Ported from blue_pill_dev/bfrc, which is where this channel map and the two
+// rate controls were developed. readChannel() is 0-indexed: Ch<n> = idx n-1.
 //
-// Output is Serial1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
-// the 3DR radio. Sending profiling data over the link whose airtime starvation
-// you are trying to characterise would perturb the very thing being measured.
+//   Ch3  (idx2) DRIVE     : self-centring pot, fwd/back -> velocity target for
+//                           the outer (velocity->lean) loop. Idle -> 0, so the
+//                           robot simply balances in place.
+//   Ch4  (idx3) STEER     : self-centring pot -> differential PWM trim applied
+//                           AFTER the balance PID. Idle -> 0.
+//   Ch5  (idx4) CALIBRATE : momentary button, rising edge starts an IMU cal.
+//   Ch6  (idx5) TARGET=0  : momentary button, rising edge zeroes the target.
+//   Ch7  (idx6) MOTORS    : 2-position switch. HIGH = armed, LOW = disarmed.
+//   Ch8  (idx7) TARGET +- : self-centring pot. RATE control that integrates
+//                           targetAngle -- the SAME variable the GUI's "Target"
+//                           bar sets via S<f>. See the degrees note below.
+//   Ch9  (idx8) LEG SEL   : 3-position switch gating Ch10:
+//                           LOW = mirrored (both legs), MID = left, HIGH = right.
+//   Ch10 (idx9) CROUCH    : pot. Centre = hold. Off-centre crouches (+) or
+//                           stretches (-) the Ch9-selected leg(s), as a RATE.
 //
-// TWO STREAMS
-//   1. one raw row per 100 Hz tick, so every stage's cost is visible per-tick
-//   2. a 1 Hz report: worst 5 ticks, best tick, mean, and modal bucket, ending
-//      in the WORST-CASE FREE microseconds — the honest budget for adding RC
-//
-// The report is ~11 lines but the UART TX ring is only 256 B, so it can never
-// be written in one tick. It is emitted ONE LINE PER TICK across the following
-// ticks instead, with the raw row suppressed while that runs (those ticks are
-// still counted in the statistics — only their printing is skipped). This is
-// why nothing here can ever block: every write is a single line, guarded.
+// Ch1/Ch2 are deliberately unused so a mode-2 TX's right-hand stick is left
+// alone. This map matches bfrc; it is NOT RC_mcu_IK_wireless's (Ch3/4/5/7/8/10
+// with different meanings). Verify against the live RC: telemetry before arming.
 // ============================================================================
-#define PROF_STAGES 8
-// Column letters, in loop order. Keep in sync with PROF_KEYS below.
-//   I readIMU (I2C)   K calibrationTask   Y safety cutoff   E encoder->velocity
-//   C balance PID + setMotors             R telemetryRX+parse
-//   V pollLegServosTask (AX-12 bus)       T telemetry block
-static const char PROF_KEYS[PROF_STAGES + 1] = "IKYECRVT";
+// ── iBUS DECODER — hand-rolled, no IBusBM ──────────────────────────────────
+// Ported from blue_pill_dev/rc_test, which is the build verified against the
+// real receiver. That sketch deliberately dropped IBusBM, and the reasons apply
+// just as much here:
+//
+//   * IBusBM::loop() owns Serial1 internally and does not expose the bytes it
+//     consumes, so the raw wire content cannot be observed alongside it. The
+//     RXB diagnostic below (which distinguishes "nothing arriving on PA10" from
+//     "bytes arrive but never decode") is only possible if we do the reading.
+//   * IBusBM::begin()'s default timerid=0 seizes TIM1 on STM32 and runs the
+//     parser from a 1 ms ISR whose sensor branch calls delayMicroseconds(100)
+//     plus blocking writes — unbounded jitter in a 100 Hz control loop. With no
+//     library there is no timer to mis-initialise and no ISR at all.
+//   * The library resynchronises on a 3 ms gap and assumes it is called far
+//     more often than a frame arrives, which makes it silently undecodable if
+//     ever called on a slow schedule. Owning the loop removes that trap.
+//
+// This implements exactly what IBusBM.cpp's GET_LENGTH/GET_DATA/GET_CHKSUM*
+// states do — same protocol constants, same little-endian channel unpack — so a
+// real iBUS frame decodes identically.
+//
+//   iBUS frame: 0x20 0x40 <28 data bytes> <ck_lo> <ck_hi>
+//   checksum:   0xFFFF - (sum of every byte before the two checksum bytes)
+#define PROTOCOL_LENGTH     0x20   // an iBUS frame is always 32 bytes total
+#define PROTOCOL_OVERHEAD   3      // command(1) + checksum(2) beyond the data
+#define PROTOCOL_COMMAND    0x40   // "channel data" command byte
+#define PROTOCOL_TIMEGAP_MS 3      // a gap this long means a new frame starts
 
-uint16_t prof_stage[PROF_STAGES];       // this tick's per-stage microseconds
+// Frame-sync state machine state.
+enum RcParseState { RC_ST_LEN, RC_ST_DATA, RC_ST_CKL, RC_ST_CKH };
+RcParseState rcState = RC_ST_LEN;
+uint8_t  rcFrameBuf[PROTOCOL_LENGTH];
+uint8_t  rcFrameLen = 0, rcFramePtr = 0;
+uint16_t rcChksum = 0;
+uint8_t  rcChkLow = 0;
+unsigned long rcLastByteMs = 0;
 
-// --- 1 s accumulators -------------------------------------------------------
-uint32_t prof_n       = 0;              // ticks this window
-uint32_t prof_sumBody = 0;
-uint16_t prof_best    = 0xFFFF;
-uint16_t prof_bestS[PROF_STAGES];
-uint16_t prof_worst [5];                // body us, sorted descending
-uint16_t prof_worstS[5][PROF_STAGES];
-uint16_t prof_ovr = 0, prof_rxTo = 0, prof_drop = 0;
+uint32_t rcFrameTotal = 0;   // checksum-valid channel frames decoded, ever
+uint32_t rcFrameBad   = 0;   // frames that reached the checksum stage and failed
 
-// Modal bucket: 100 us bins across 0..6.3 ms, last bin catches everything above.
-#define PROF_BINS 64
-uint16_t prof_hist[PROF_BINS];
+// iBUS reports microseconds: ~1000 low, ~1500 centre, ~2000 high. A channel the
+// receiver never populated reads 0 — every parse below treats 0 as "no data",
+// never as a stick at its low endpoint, or an unbound channel would look like a
+// held-down switch.
+#define RC_MIN        1000
+#define RC_CENTRE     1500
+#define RC_MAX        2000
 
-uint32_t prof_printUs = 0;              // previous tick's instrumentation cost
-int8_t   prof_report  = -1;             // >=0 while a report is being emitted
+// Deadband in microseconds either side of centre. Cheap gimbals do not return
+// to exactly 1500 and the pots are noisy; without this the robot creeps
+// whenever the sticks are nominally centred.
+#define RC_DEADBAND   75
 
-// Snapshot the window so the report can be emitted over the following ticks
-// while a fresh window is already accumulating.
-uint32_t rep_n, rep_sum;
-uint16_t rep_best, rep_bestS[PROF_STAGES];
-uint16_t rep_worst[5], rep_worstS[5][PROF_STAGES];
-uint16_t rep_modeBin, rep_modeCount, rep_ovr, rep_rxTo, rep_drop;
+// Rate-integration timebase for Ch8/Ch10, in ms.
+//
+// NOT a poll gate. The decoder below must see every byte, and it resynchronises
+// on a PROTOCOL_TIMEGAP_MS (3 ms) gap between bytes — so it has to be fed as
+// the bytes arrive, not on a schedule of our choosing. readRC() therefore
+// drains Serial1 on every 100 Hz tick and this constant is used ONLY as the
+// nominal dt for the two rate controls.
+//
+// (An earlier cut of this RC layer gated the drain to once per 10 ms. With a
+// 3 ms resync gap that guarantees the parser discards its state on every call
+// and treats the next byte as a frame-length byte, mid-frame: it can never
+// assemble a 32-byte frame, every channel reads 0, and the link reports down
+// forever with the receiver, wiring and transmitter all fine. Do not
+// reintroduce a gate here.)
+#define RC_POLL_INTERVAL_MS  10
 
-void profResetWindow() {
-  prof_n = 0; prof_sumBody = 0; prof_best = 0xFFFF;
-  for (int i = 0; i < 5; i++) prof_worst[i] = 0;
-  for (int i = 0; i < PROF_BINS; i++) prof_hist[i] = 0;
-  prof_ovr = 0; prof_rxTo = 0; prof_drop = 0;
-}
+// Hard microsecond cap on one drain. The bytes are already in Serial1's ring
+// buffer by the time we look, so draining them is memory-speed, not baud-speed:
+// a whole 32-byte frame costs well under 100 us. 400 us is a 4% slice of the
+// 10 ms tick and a backstop against a pathological burst, not a normal
+// operating limit. Exiting early is safe — the state machine simply resumes
+// mid-frame on the next tick, exactly as it does between frames.
+#define RC_BUDGET_US  400
 
-void profAccumulate(uint16_t body) {
-  prof_n++;
-  prof_sumBody += body;
-  if (body > 10000 && prof_ovr < 0xFFFF) prof_ovr++;
+// Failsafe. The FS-iA10B keeps emitting frames when the TX is off, so "no
+// frames at all" means the receiver is unpowered, unbound, or the signal wire
+// is cut — the operator has lost control of an armed inverted pendulum, so the
+// motors are disarmed. 500 ms is ~70 missed frames: long enough that a burst of
+// interference cannot nuisance-trip it, short enough that a runaway robot does
+// not get far.
+#define RC_TIMEOUT_MS 500
 
-  uint16_t bin = body / 100;
-  if (bin >= PROF_BINS) bin = PROF_BINS - 1;
-  if (prof_hist[bin] < 0xFFFF) prof_hist[bin]++;
+bool  rcEnabled   = true;    // RE0/RE1 — lets the GUI take sole control
+bool  rcLinkOK    = false;   // frames arriving?
+uint32_t rcRxBytes = 0;      // DIAG: raw USART1 bytes seen on the wire
+unsigned long rcLastFrameMs = 0;
 
-  if (body < prof_best) {
-    prof_best = body;
-    for (int i = 0; i < PROF_STAGES; i++) prof_bestS[i] = prof_stage[i];
+// Decoded stick state, held between polls.
+float rc_drive      = 0.0f;  // Ch3, -1..+1, forward positive
+float rc_steer      = 0.0f;  // Ch4, -1..+1, right positive
+float rc_targetAxis = 0.0f;  // Ch8, -1..+1, raw axis before rate integration
+float rc_crouchAxis = 0.0f;  // Ch10, -1..+1, raw axis before rate integration
+bool  rc_arm        = false; // Ch7 armed?
+bool  rcPrevArm     = false; // edge detect on Ch7
+bool  rcPrevCal     = false; // edge detect on Ch5
+bool  rcPrevZero    = false; // edge detect on Ch6
+uint8_t rc_legSel   = 0;     // Ch9: 0=mirrored, 1=left only, 2=right only
+bool  rcHaveSeenArmLow = false;  // boot-time arm interlock, see readRC()
+
+// Raw widths for all TEN channels, forwarded to the GUI so the operator can
+// verify the map and calibrate endpoints without a TX-side display.
+#define RC_NUM_CH 10
+uint16_t rc_raw[RC_NUM_CH] = {0};
+
+// ── PER-CHANNEL CALIBRATION (min / centre / max, microseconds) ──────────────
+// Captured by the GUI and written back with RCC<ch>,<min>,<centre>,<max>.
+// Defaults are the nominal FlySky endpoints, so an uncalibrated robot behaves
+// exactly as it would without this feature.
+uint16_t rcCalMin[RC_NUM_CH], rcCalCen[RC_NUM_CH], rcCalMax[RC_NUM_CH];
+
+void rcCalDefaults() {
+  for (uint8_t i = 0; i < RC_NUM_CH; i++) {
+    rcCalMin[i] = RC_MIN; rcCalCen[i] = RC_CENTRE; rcCalMax[i] = RC_MAX;
   }
-  // Top-5 insertion sort, descending. Five compares worst case, ~1 us.
-  for (int i = 0; i < 5; i++) {
-    if (body > prof_worst[i]) {
-      for (int j = 4; j > i; j--) {
-        prof_worst[j] = prof_worst[j - 1];
-        for (int k = 0; k < PROF_STAGES; k++)
-          prof_worstS[j][k] = prof_worstS[j - 1][k];
-      }
-      prof_worst[i] = body;
-      for (int k = 0; k < PROF_STAGES; k++) prof_worstS[i][k] = prof_stage[k];
-      break;
-    }
-  }
 }
 
-void profSnapshotReport() {
-  rep_n   = prof_n ? prof_n : 1;
-  rep_sum = prof_sumBody;
-  rep_best = (prof_best == 0xFFFF) ? 0 : prof_best;
-  for (int i = 0; i < PROF_STAGES; i++) rep_bestS[i] = prof_bestS[i];
-  for (int i = 0; i < 5; i++) {
-    rep_worst[i] = prof_worst[i];
-    for (int k = 0; k < PROF_STAGES; k++) rep_worstS[i][k] = prof_worstS[i][k];
-  }
-  rep_modeBin = 0; rep_modeCount = 0;
-  for (int i = 0; i < PROF_BINS; i++)
-    if (prof_hist[i] > rep_modeCount) { rep_modeCount = prof_hist[i]; rep_modeBin = i; }
-  rep_ovr = prof_ovr; rep_rxTo = prof_rxTo; rep_drop = prof_drop;
-  prof_report = 0;
-  profResetWindow();
-}
+// How far the sticks may command.
+float RC_MAX_VEL    = 400.0f;  // counts/sec at full Ch3 drive pot  — RV cmd
+float RC_MAX_STEER  = 40.0f;   // PWM counts at full Ch4 steer pot  — RS cmd
+float RC_MAX_CROUCH = 40.0f;   // mm of crouch travel (Ch10 limit)  — RCM cmd
 
-// Append " I1340 K0 Y0 ..." for one stage vector.
-int profStages(char *buf, int cap, const uint16_t *s) {
-  int n = 0;
-  for (int i = 0; i < PROF_STAGES && n < cap - 12; i++)
-    n += snprintf(buf + n, cap - n, " %c%u", PROF_KEYS[i], (unsigned)s[i]);
-  return n;
-}
+// ── Ch8 TARGET-RATE control — IN DEGREES ───────────────────────────────────
+// Ch8 drives `targetAngle`, the same variable the GUI's "Target" slider sets
+// with S<f>. That slider's range is -20..+20 DEGREES, so this band is in
+// deg/sec and the clamp is in degrees.
+//
+// THIS IS THE ONE DELIBERATE DEPARTURE FROM bfrc. There, Ch8 fed a separate
+// `rc_target` accumulator in ENCODER COUNTS (10-100 counts/sec, clamped
+// +-5000) which no control law consumed — the README lists it as unfinished.
+// Pointing those numbers at targetAngle would be catastrophic: 100 deg/sec of
+// setpoint slew on a balance loop whose safety cutoff is 25 deg would trip the
+// cutoff in about a quarter of a second, and the +-5000 clamp is 250x the
+// slider's full range. Rescaled to something a human can aim:
+//   just off centre -> 0.5 deg/sec (fine trim, the usual case)
+//   full deflection -> 5.0 deg/sec (a deliberate lean)
+// with the accumulated value clamped to the slider's own +-20 deg.
+float RC_TARGET_RATE_MIN =  0.5f;   // deg/sec just off centre     — RTN cmd
+float RC_TARGET_RATE_MAX =  5.0f;   // deg/sec at full pot         — RTX cmd
+float RC_TARGET_LIMIT    = 20.0f;   // clamp on targetAngle, deg   — RTL cmd
 
-// One report line per call. Returns false when the report is finished.
-bool profReportLine(char *b, int cap) {
-  int n = 0;
-  uint32_t mean = rep_sum / rep_n;
-  switch (prof_report) {
-    case 0:
-      snprintf(b, cap, "=== BUDGET 1s: %lu ticks x 10000us ===",
-               (unsigned long)rep_n);
-      break;
-    case 1:
-      snprintf(b, cap, "  mean B%luus %lu.%lu%% free %luus",
-               (unsigned long)mean, (unsigned long)(mean / 100),
-               (unsigned long)((mean / 10) % 10), (unsigned long)(10000 - mean));
-      break;
-    case 2:
-      n = snprintf(b, cap, "  best B%uus free %uus",
-                   (unsigned)rep_best, (unsigned)(10000 - rep_best));
-      profStages(b + n, cap - n, rep_bestS);
-      break;
-    case 3:
-      snprintf(b, cap, "  mode B%u-%uus (%u of %lu ticks)",
-               (unsigned)(rep_modeBin * 100), (unsigned)(rep_modeBin * 100 + 99),
-               (unsigned)rep_modeCount, (unsigned long)rep_n);
-      break;
-    case 4: case 5: case 6: case 7: case 8: {
-      int i = prof_report - 4;
-      n = snprintf(b, cap, "  w%d B%uus %lu.%lu%%", i + 1, (unsigned)rep_worst[i],
-                   (unsigned long)(rep_worst[i] / 100),
-                   (unsigned long)((rep_worst[i] / 10) % 10));
-      profStages(b + n, cap - n, rep_worstS[i]);
-      break;
-    }
-    case 9:
-      // The number that answers "how much room is left for RC": not the mean,
-      // the WORST tick. A stage that fits on average but not on the worst tick
-      // is a stage that overruns the loop under load.
-      snprintf(b, cap, "  WORST-CASE FREE %uus (%lu.%lu%%) <- RC budget",
-               (unsigned)(10000 - rep_worst[0]),
-               (unsigned long)((10000 - rep_worst[0]) / 100),
-               (unsigned long)(((10000 - rep_worst[0]) / 10) % 10));
-      break;
-    case 10:
-      snprintf(b, cap, "  ovr %u  servo_timeout %u  rows_dropped %u",
-               (unsigned)rep_ovr, (unsigned)rep_rxTo, (unsigned)rep_drop);
-      break;
-    default:
-      return false;
-  }
-  return true;
-}
+// ── Ch10 CROUCH-RATE control ───────────────────────────────────────────────
+// Pot centred = hold the current crouch, off-centre = move at a rate. A rate
+// is the right primitive: the pot has no detents matching leg geometry, and
+// startPoseMove() must not be restarted on every poll (see readRC()).
+float RC_CROUCH_RATE = 25.0f;       // mm/sec at full Ch10 pot     — RCR cmd
 
 // ── MPU6050 ───────────────────────────────────────────────────────────────────
 const int MPU_ADDR = 0x68;
@@ -262,6 +271,10 @@ bool  autoTrimEnabled = true;           // velocity loop ON by default in this v
 float Kp_vel  = 0.0030f;                // deg of lean per (count/s) of error  — VP cmd
 float Ki_trim = 0.0015f;                // deg of lean per (count/s) per second — TG cmd
 float trim_bias = 0.0f;                 // integral part of the lean command (deg)
+// Velocity SETPOINT for the outer loop, written by the Ch3 drive pot. Was the
+// literal 0.0f before RC: with no drive input, any motion was error. Now the
+// loop that used to only reject motion also commands it, using the same gains.
+float target_velocity = 0.0f;           // counts/sec, forward positive
 float lean_cmd  = 0.0f;                 // TOTAL commanded lean = P + I (deg), telemetry
 // Clamped in DEGREES because that is what this loop outputs. 6 deg is a real
 // lean the robot can hold; the old 15 deg was 60% of the 25 deg safety cutoff,
@@ -393,7 +406,12 @@ bool  ikValid[2] = {true, true};         // last solve was in-reach?
 const float ik_fx1 = 1.0f,  ik_fy1 = -151.1f;   // Leg1 standing foot target (mm)
 const float ik_fx2 = -6.0f, ik_fy2 = -149.6f;   // Leg2 standing foot target (mm)
 const float ik_dist = 180.0f;                    // leg separation (mm)
-float crouchOffset = 0.0f;   // CR command: 0 = standing (default), + = crouched (mm)
+// Per-leg crouch: 0 = standing (default), + = crouched (mm). Independently
+// settable via CRL<f>/CRR<f>; CR<f> is a convenience that sets both at once
+// (kept for back-compat with the old single "one vertical knob" behaviour —
+// the GUI's mirror checkbox drives this path when linked).
+float crouchOffsetL = 0.0f;  // Leg1 crouch
+float crouchOffsetR = 0.0f;  // Leg2 crouch
 
 struct Point2D { float x; float y; };
 
@@ -539,8 +557,8 @@ void ax12SyncWriteGoals() {
 // ── POSE TRAJECTORY HELPERS ──────────────────────────────────────────────────
 void computeDesiredFoot(float *fx, float *fy) {
   if (poseMode == MODE_CROUCH) {
-    fx[0] = ik_fx1;  fy[0] = ik_fy1 + crouchOffset;
-    fx[1] = ik_fx2;  fy[1] = ik_fy2 + crouchOffset;
+    fx[0] = ik_fx1;  fy[0] = ik_fy1 + crouchOffsetL;
+    fx[1] = ik_fx2;  fy[1] = ik_fy2 + crouchOffsetR;
   } else {
     fx[0] = ft_x[0]; fy[0] = ft_y[0];
     fx[1] = ft_x[1]; fy[1] = ft_y[1];
@@ -792,7 +810,10 @@ void setMotors(int leftPWM, int rightPWM) {
 
 // ── COMMAND PARSER — single-loop balance + calibration only ──────────────────
 void parseCommand(char *cmd) {
-  char ack[160];
+  // 256, not 160: the "Updated ->" ack below now carries the RC limits and
+  // rate band too, and snprintf would silently truncate the tail fields the
+  // GUI parses. Sized with headroom for the widest float formatting.
+  char ack[256];
 
   // PING:<token> → PONG:<token>  (keeps latency_test.py working)
   if (cmd[0]=='P' && cmd[1]=='I' && cmd[2]=='N' && cmd[3]=='G') {
@@ -905,7 +926,8 @@ void parseCommand(char *cmd) {
   }
   // HM — home: standing pose in both modes
   else if (cmd[0]=='H' && cmd[1]=='M') {
-    crouchOffset = 0.0f;
+    crouchOffsetL = 0.0f;
+    crouchOffsetR = 0.0f;
     ft_x[0]=ik_fx1; ft_y[0]=ik_fy1;
     ft_x[1]=ik_fx2; ft_y[1]=ik_fy2;
     startPoseMove();
@@ -922,10 +944,11 @@ void parseCommand(char *cmd) {
     uint8_t want = (cmd[2] == '1') ? MODE_IK : MODE_CROUCH;
     if (want != poseMode) {
       if (want == MODE_IK) {
-        ft_x[0]=ik_fx1; ft_y[0]=ik_fy1+crouchOffset;
-        ft_x[1]=ik_fx2; ft_y[1]=ik_fy2+crouchOffset;
+        ft_x[0]=ik_fx1; ft_y[0]=ik_fy1+crouchOffsetL;
+        ft_x[1]=ik_fx2; ft_y[1]=ik_fy2+crouchOffsetR;
       } else {
-        crouchOffset = 0.5f * ((ft_y[0]-ik_fy1) + (ft_y[1]-ik_fy2));
+        crouchOffsetL = ft_y[0]-ik_fy1;
+        crouchOffsetR = ft_y[1]-ik_fy2;
       }
     }
     poseMode = want;
@@ -934,19 +957,124 @@ void parseCommand(char *cmd) {
   // RB — request state broadcast (GUI resync after connect)
   else if (cmd[0]=='R' && cmd[1]=='B') {
     // Build and send an AX12 state line immediately
-    char sl[192];
+    char sl[208];
     int n = snprintf(sl, sizeof(sl),
-      "AX12:MODE:%u,TQ:%u,TL:%u,CM:%u,CS:%u,MS:%u,MT:%u,CR:%.1f,"
+      "AX12:MODE:%u,TQ:%u,TL:%u,CM:%u,CS:%u,MS:%u,MT:%u,CRL:%.1f,CRR:%.1f,"
       "FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%u,IK2:%u,MOVE:%d\n",
       (unsigned)poseMode,(unsigned)(g_torqueOn?1:0),
       (unsigned)g_torqueLimit,(unsigned)g_compMargin,
       (unsigned)g_compSlope,(unsigned)g_movingSpeed,
-      (unsigned)moveTimeMs, crouchOffset,
+      (unsigned)moveTimeMs, crouchOffsetL, crouchOffsetR,
       ft_x[0],ft_y[0],ft_x[1],ft_y[1],
       (unsigned)(ikValid[0]?1:0),(unsigned)(ikValid[1]?1:0),(int)moveActive);
     if (n > 0 && n < (int)sizeof(sl) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)sl, n);
     return;
+  }
+
+  // ── RC COMMANDS — multi-char, MUST precede the single-letter 'R' below ────
+  // Every command here starts with 'R', which is also the reset-integral
+  // command. Without these cases sitting above it, "RV400" would match
+  // `cmd[0]=='R'`, reset the integrator and silently discard the value — the
+  // prefix-collision failure the protocol doc warns about.
+  if (cmd[0]=='R' && cmd[1]=='E') {
+    // RE0 hands sole control to the GUI: the receiver is still read (so the
+    // failsafe and the RC: telemetry keep working and the sticks stay visible)
+    // but no channel may touch the control state. RE1 gives the transmitter
+    // authority back. This is how you tune over the radio with a powered TX on
+    // the bench without the sticks fighting your sliders.
+    rcEnabled = (cmd[2] == '1');
+    if (!rcEnabled) {
+      rc_drive = 0.0f;
+      rc_steer = 0.0f;
+      target_velocity = 0.0f;
+      // Deliberately does NOT disarm: pulling RC authority mid-balance would
+      // drop the robot. The GUI's M command remains in charge of arming.
+    }
+    snprintf(ack, sizeof(ack), "ACK:RC_%s", rcEnabled ? "ON" : "OFF");
+    Serial3.println(ack);
+    return;
+  }
+  else if (cmd[0]=='R' && cmd[1]=='V') {
+    // Counts/sec commanded at full Ch3 drive pot.
+    RC_MAX_VEL = constrain(atof(cmd + 2), 0.0f, 2000.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='S') {
+    // PWM counts of differential steer at full Ch4 pot. Kept well under 255 so
+    // steering can never on its own saturate a motor and starve the balance
+    // PID of the authority it needs to stay upright.
+    RC_MAX_STEER = constrain(atof(cmd + 2), 0.0f, 120.0f);
+  }
+
+  // ── RCC<ch>,<min>,<cen>,<max> — per-channel calibration from the GUI ─────
+  // <ch> is 1-based (matching the transmitter's labelling and the GUI), so the
+  // conversion to a 0-based index happens here — the single most likely
+  // off-by-one in this feature, kept in one place.
+  //
+  // Validated rather than trusted: a calibration with min >= cen or cen >= max
+  // would make rcAxisCal() divide by a negative span and produce inverted or
+  // enormous axis values on a channel the operator believes they just fixed.
+  // A bad line is NAKed and the previous calibration survives.
+  //
+  // Checked before RCM/RCR (also "RC?") — all three are distinguished by the
+  // third character, so their relative order matters.
+  else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='C') {
+    int ch = 0, mn = 0, cn = 0, mx = 0;
+    if (sscanf(cmd + 3, "%d,%d,%d,%d", &ch, &mn, &cn, &mx) == 4 &&
+        ch >= 1 && ch <= RC_NUM_CH &&
+        mn >= 500 && mx <= 2500 && mn < cn && cn < mx) {
+      uint8_t i = (uint8_t)(ch - 1);
+      rcCalMin[i] = (uint16_t)mn;
+      rcCalCen[i] = (uint16_t)cn;
+      rcCalMax[i] = (uint16_t)mx;
+      snprintf(ack, sizeof(ack), "ACK:RCCAL %d %d %d %d", ch, mn, cn, mx);
+    } else {
+      snprintf(ack, sizeof(ack), "NAK:RCCAL");
+    }
+    Serial3.println(ack);
+    return;
+  }
+  // RCD — dump the whole calibration table, one line per channel, so the GUI
+  // populates its tab from the robot rather than a local file that may have
+  // drifted from what is actually flashed.
+  else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='D') {
+    for (uint8_t i = 0; i < RC_NUM_CH; i++) {
+      char l[64];
+      int n = snprintf(l, sizeof(l), "RCCAL:%u,%u,%u,%u\n",
+                       (unsigned)(i + 1), (unsigned)rcCalMin[i],
+                       (unsigned)rcCalCen[i], (unsigned)rcCalMax[i]);
+      if (n > 0) Serial3.write((uint8_t*)l, n);
+    }
+    Serial3.println("ACK:RCCAL_DUMP");
+    return;
+  }
+  // RCZ — reset every channel to the nominal FlySky endpoints.
+  else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='Z') {
+    rcCalDefaults();
+    Serial3.println("ACK:RCCAL_RESET");
+    return;
+  }
+  // RCR<f> — Ch10 crouch rate, mm/sec at full pot.
+  else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='R') {
+    RC_CROUCH_RATE = constrain(atof(cmd + 3), 1.0f, 200.0f);
+  }
+  // RCM<f> — Ch10 crouch travel limit, mm.
+  else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='M') {
+    RC_MAX_CROUCH = constrain(atof(cmd + 3), 0.0f, 80.0f);
+  }
+
+  // ── Ch8 target-rate band (DEGREES/sec — see the RC_TARGET_* comment) ─────
+  // RTN slow end, RTX fast end, RTL clamp on the accumulated targetAngle.
+  // RTN is held below RTX so the band cannot be inverted, which would make the
+  // pot move the target FASTER the closer it sits to centre.
+  else if (cmd[0]=='R' && cmd[1]=='T' && cmd[2]=='N') {
+    RC_TARGET_RATE_MIN = constrain(atof(cmd + 3), 0.0f, RC_TARGET_RATE_MAX);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='T' && cmd[2]=='X') {
+    RC_TARGET_RATE_MAX = constrain(atof(cmd + 3), RC_TARGET_RATE_MIN, 60.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='T' && cmd[2]=='L') {
+    RC_TARGET_LIMIT = constrain(atof(cmd + 3), 0.0f, 45.0f);
   }
 
   // Auto-trim controls — multi-char, must be checked before the single-letter
@@ -1010,10 +1138,21 @@ void parseCommand(char *cmd) {
     Serial3.println("ACK:SERVOS_RESET");
     return;
   }
+  else if (cmd[0] == 'C' && cmd[1] == 'R' && cmd[2] == 'L') {
+    // Per-leg crouch — checked before plain "CR" so "CRL5" doesn't parse as
+    // CR with a garbage float ("L5").
+    crouchOffsetL = atof(cmd + 3);
+    if (poseMode == MODE_CROUCH) startPoseMove();
+  }
+  else if (cmd[0] == 'C' && cmd[1] == 'R' && cmd[2] == 'R') {
+    crouchOffsetR = atof(cmd + 3);
+    if (poseMode == MODE_CROUCH) startPoseMove();
+  }
   else if (cmd[0] == 'C' && cmd[1] == 'R') {
-    // Crouch bar — checked before the bare 'C' (calibrate) case, or "CR40"
-    // would trigger an IMU calibration instead of setting crouch depth.
-    crouchOffset = atof(cmd + 2);
+    // Crouch bar — sets BOTH legs (mirrored knob), checked before the bare
+    // 'C' (calibrate) case, or "CR40" would trigger an IMU calibration
+    // instead of setting crouch depth.
+    crouchOffsetL = crouchOffsetR = atof(cmd + 2);
     // Route through the SAME interpolated trajectory engine every other pose
     // command uses. The old path called solveGoalsFor() on local fx/fy, which
     // cached goalPos but left cur_x/cur_y frozen at the standing pose. Two
@@ -1049,8 +1188,10 @@ void parseCommand(char *cmd) {
 
   // Ack for tuning commands — parsed by _parse_fw_update() in the GUI.
   snprintf(ack, sizeof(ack),
-    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f Crouch:%.2f VP:%.4f",
-    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffset, Kp_vel);
+    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f CrouchL:%.2f CrouchR:%.2f VP:%.4f RV:%.1f RS:%.1f RCM:%.1f RCR:%.1f RTN:%.2f RTX:%.2f RTL:%.1f",
+    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffsetL, crouchOffsetR, Kp_vel,
+    RC_MAX_VEL, RC_MAX_STEER, RC_MAX_CROUCH, RC_CROUCH_RATE,
+    RC_TARGET_RATE_MIN, RC_TARGET_RATE_MAX, RC_TARGET_LIMIT);
   uint8_t len = (uint8_t)strlen(ack);
   ack[len] = '\n'; len++;
   if (Serial3.availableForWrite() >= len)
@@ -1082,13 +1223,342 @@ void handleTelemetryRX() {
   }
 }
 
+// ============================================================================
+// RC READ — cooperative, budgeted. Called once per 100 Hz tick.
+// ----------------------------------------------------------------------------
+// Nothing here blocks, allocates, or calls delay(), and there is no interrupt
+// involved: the decoder is driven synchronously from the 100 Hz tick, so its
+// cost is visible in the tick budget rather than stolen from it at some
+// unpredictable moment.
+// ============================================================================
+
+// Feed exactly one raw byte through the frame-sync state machine.
+// lastFrameMs/linkOK are set at the instant a valid frame completes, so the
+// failsafe measures real decode success rather than mere byte activity — line
+// noise alone can keep Serial1.available() true indefinitely.
+static void rcFeedByte(uint8_t v, unsigned long nowMs) {
+  if (nowMs - rcLastByteMs >= PROTOCOL_TIMEGAP_MS) rcState = RC_ST_LEN;
+  rcLastByteMs = nowMs;
+
+  switch (rcState) {
+    case RC_ST_LEN:
+      if (v <= PROTOCOL_LENGTH && v > PROTOCOL_OVERHEAD) {
+        rcFramePtr = 0;
+        rcFrameLen = v - PROTOCOL_OVERHEAD;
+        rcChksum   = 0xFFFF - v;
+        rcState    = RC_ST_DATA;
+      }
+      // else: not a plausible length byte — stay here and wait for one
+      break;
+
+    case RC_ST_DATA:
+      rcFrameBuf[rcFramePtr++] = v;
+      rcChksum -= v;
+      if (rcFramePtr == rcFrameLen) rcState = RC_ST_CKL;
+      break;
+
+    case RC_ST_CKL:
+      rcChkLow = v;
+      rcState  = RC_ST_CKH;
+      break;
+
+    case RC_ST_CKH: {
+      uint16_t received = ((uint16_t)v << 8) | rcChkLow;
+      if (rcChksum == received) {
+        // Valid frame. rcFrameBuf[0] is the command byte; [1..] are channel
+        // values, little-endian, 2 bytes each.
+        if (rcFrameBuf[0] == PROTOCOL_COMMAND) {
+          for (uint8_t i = 0; i + 2 < rcFrameLen && (i / 2) < RC_NUM_CH; i += 2) {
+            rc_raw[i / 2] = rcFrameBuf[i + 1] | ((uint16_t)rcFrameBuf[i + 2] << 8);
+          }
+          rcFrameTotal++;
+          rcLinkOK     = true;
+          rcLastFrameMs = nowMs;
+        }
+      } else {
+        rcFrameBad++;
+      }
+      rcState = RC_ST_LEN;
+      break;
+    }
+  }
+}
+
+// Bipolar axis read, calibration-aware, with a centre deadband.
+//
+// The two sides are scaled INDEPENDENTLY against their own endpoint, because a
+// real pot is rarely symmetric: centre might sit at 1480 with travel to 1000
+// and 2000, giving 480 us of low-side travel and 520 of high. Scaling both by
+// one span would make full-left read 0.92 while full-right read 1.00.
+static float rcAxisCal(uint16_t raw, uint8_t ch) {
+  if (raw == 0) return 0.0f;                          // never populated
+  uint16_t lo = rcCalMin[ch], cen = rcCalCen[ch], hi = rcCalMax[ch];
+  if (raw < lo - 200 || raw > hi + 200) return 0.0f;  // nonsense
+  int delta = (int)raw - (int)cen;
+  if (delta > RC_DEADBAND) {
+    float span = (float)hi - (float)cen - RC_DEADBAND;
+    if (span < 1.0f) return 0.0f;                     // degenerate calibration
+    return constrain((float)(delta - RC_DEADBAND) / span, -1.0f, 1.0f);
+  } else if (delta < -RC_DEADBAND) {
+    float span = (float)cen - (float)lo - RC_DEADBAND;
+    if (span < 1.0f) return 0.0f;
+    return constrain((float)(delta + RC_DEADBAND) / span, -1.0f, 1.0f);
+  }
+  return 0.0f;                                        // inside deadband
+}
+
+// Unipolar 0..1 read (a control travelling one way only), calibration-aware.
+static float rcUnipolar(uint16_t raw, uint8_t ch) {
+  if (raw == 0) return 0.0f;
+  float span = (float)rcCalMax[ch] - (float)rcCalMin[ch];
+  if (span < 1.0f) return 0.0f;
+  return constrain(((float)raw - (float)rcCalMin[ch]) / span, 0.0f, 1.0f);
+}
+
+// A switch is HIGH relative to its OWN calibrated centre, not a global 1500.
+static inline bool rcSwitchHigh(uint16_t raw, uint8_t ch) {
+  return (raw > 0) && (raw > rcCalCen[ch]);
+}
+
+// Map a centred axis onto a RATE band with a SQUARED taper. Used by Ch8 and
+// Ch10, both rate controls: idle at centre, slow just off centre, fastest at
+// the stop. Squaring expands the fine end of the pot's travel, which is where
+// the careful work happens — a linear map reaches 55% of max at half travel and
+// feels jumpy; squared reaches ~35%.
+static float rcRateFromAxis(float axis, float rateMin, float rateMax) {
+  float mag = fabsf(axis);
+  if (mag <= 0.0f) return 0.0f;
+  float rate = rateMin + (rateMax - rateMin) * (mag * mag);
+  return (axis < 0.0f) ? -rate : rate;
+}
+
+void readRC() {
+  unsigned long nowMs = millis();
+
+  // ── DRAIN EVERY TICK, BUDGETED ───────────────────────────────────────────
+  // One read per byte, feeding the frame parser directly. No decimation gate:
+  // the parser resyncs on a 3 ms inter-byte gap, so it must see bytes as they
+  // arrive (see RC_POLL_INTERVAL_MS). rc_raw[] is written by rcFeedByte() the
+  // moment a checksum-valid frame completes, so there is no separate "read the
+  // channels" step to fall out of sync with the decoder.
+  unsigned long t0 = micros();
+  // DIAG: count raw bytes the UART delivered. Separates "nothing arriving on
+  // PA10" (rcRxBytes stays 0) from "bytes arrive but never decode"
+  // (rcRxBytes climbs while rcFrameTotal does not) — a distinction the channel
+  // values cannot make, since both leave them at 0.
+  while (Serial1.available() && (micros() - t0) < RC_BUDGET_US) {
+    uint8_t b = (uint8_t)Serial1.read();
+    rcRxBytes++;
+    rcFeedByte(b, nowMs);
+  }
+
+  // ── LINK HEALTH ──────────────────────────────────────────────────────────
+  // rcLinkOK/rcLastFrameMs are set inside rcFeedByte() at the instant a valid
+  // frame lands. Here we only time out. Guarded on rcFrameTotal so a robot
+  // that has never seen a frame does not report a "lost" link it never had.
+  if (rcFrameTotal > 0 && (nowMs - rcLastFrameMs > RC_TIMEOUT_MS)) {
+    rcLinkOK = false;
+  }
+
+  // ── FAILSAFE ─────────────────────────────────────────────────────────────
+  // Done before any channel is decoded, so a stale buffer cannot command
+  // anything. targetAngle is deliberately NOT zeroed: it is the operator's
+  // balance trim, shared with the GUI slider, and silently moving it on a
+  // radio dropout would change how the robot balances for reasons invisible
+  // from the GUI. Only the motion commands are cleared.
+  if (!rcLinkOK) {
+    rc_drive = 0.0f;
+    rc_steer = 0.0f;
+    rc_targetAxis = 0.0f;
+    rc_crouchAxis = 0.0f;
+    target_velocity = 0.0f;
+    if (rc_arm) {                     // we were armed and just lost the link
+      rc_arm = false;
+      rcPrevArm = false;
+      if (rcEnabled && motorsEnabled) {
+        motorsEnabled = false;
+        setMotors(0, 0);
+        integral = 0.0f; trim_bias = 0.0f;
+        Serial3.println("SAFETY:RC_LINK_LOST");
+      }
+    }
+    // The interlock re-arms too: after a link loss the operator must return the
+    // switch to LOW before it can arm again, so a link that recovers with the
+    // switch still HIGH does not instantly re-energise the motors.
+    rcHaveSeenArmLow = false;
+    return;
+  }
+
+  // ── RE0: GUI has control — but DISARM is never ignored ───────────────────
+  // RE0 parks the sticks so GUI sliders can be used with a live TX nearby. It
+  // must NOT also neuter the arm switch as a kill switch: an operator reaching
+  // for it on a misbehaving robot does not know or care which side holds
+  // authority. So under RE0 the switch loses ARM but keeps STOP.
+  if (!rcEnabled) {
+    bool armSwitchOff = (rc_raw[6] > 0) && !rcSwitchHigh(rc_raw[6], 6);
+    if (armSwitchOff && motorsEnabled) {
+      rc_arm        = false;
+      rcPrevArm     = false;
+      motorsEnabled = false;
+      setMotors(0, 0);
+      integral = 0.0f; trim_bias = 0.0f; target_velocity = 0.0f;
+      Serial3.println("Motors DISABLED");
+    }
+    return;
+  }
+
+  // ── Ch3 / Ch4: drive and steer (self-centring pots) ──────────────────────
+  // Idle (centred) -> both read exactly 0.0, target_velocity is 0, and the
+  // robot just balances in place. That falls out of the deadband with no
+  // special-casing.
+  rc_drive = rcAxisCal(rc_raw[2], 2);
+  rc_steer = rcAxisCal(rc_raw[3], 3);
+
+  // ── Rate-integration timebase ────────────────────────────────────────────
+  // Integrated against the ACTUAL elapsed time rather than a nominal constant,
+  // so changing the tick rate cannot silently change how fast Ch8/Ch10 slew.
+  // A stale gap (first call, or a long stall) falls back to the nominal step
+  // instead of applying one enormous integration step.
+  static unsigned long rcLastIntegMs = 0;
+  float integ_dt = (rcLastIntegMs == 0) ? (RC_POLL_INTERVAL_MS * 1.0e-3f)
+                                        : ((nowMs - rcLastIntegMs) * 1.0e-3f);
+  if (integ_dt > 0.5f) integ_dt = RC_POLL_INTERVAL_MS * 1.0e-3f;
+  rcLastIntegMs = nowMs;
+
+  // ── Ch8: targetAngle +/- as a RATE, in degrees ───────────────────────────
+  // Writes the SAME variable the GUI's "Target" bar sets via S<f>, so the two
+  // are one control with two inputs: nudge it from the transmitter, watch it
+  // move on the slider. Clamped to the slider's own range.
+  rc_targetAxis = rcAxisCal(rc_raw[7], 7);
+  if (rc_targetAxis != 0.0f) {
+    targetAngle += rcRateFromAxis(rc_targetAxis,
+                                  RC_TARGET_RATE_MIN, RC_TARGET_RATE_MAX) * integ_dt;
+    targetAngle = constrain(targetAngle, -RC_TARGET_LIMIT, RC_TARGET_LIMIT);
+  }
+
+  // Drive pot -> velocity setpoint. Only while armed: a pot pushed before
+  // arming must not bank a setpoint that takes effect the instant the motors
+  // come on.
+  target_velocity = (motorsEnabled && rc_arm) ? (rc_drive * RC_MAX_VEL) : 0.0f;
+
+  // ── Ch7: MOTORS on/off (2-position switch, edge-detected) ────────────────
+  // Interlock: the switch must be seen LOW at least once since boot (or since
+  // a link loss) before it can arm. Otherwise powering up with the switch
+  // already HIGH would arm the motors on the first frame, with nobody's hand
+  // on it.
+  bool armSwitch = rcSwitchHigh(rc_raw[6], 6);
+  if (rc_raw[6] > 0 && !armSwitch) rcHaveSeenArmLow = true;
+
+  // Resync with a disarm that came from elsewhere — the GUI's 'M' command or
+  // the tilt-cutoff latch. Without this, rc_arm would stay true while
+  // motorsEnabled is false, so the switch (already HIGH) would produce no edge
+  // and the operator could not re-arm from the transmitter without cycling it.
+  if (rc_arm && !motorsEnabled) rc_arm = false;
+
+  if (armSwitch != rcPrevArm) {
+    rcPrevArm = armSwitch;
+    if (armSwitch && rcHaveSeenArmLow) {
+      rc_arm        = true;
+      motorsEnabled = true;
+      safetyLatched = false;          // an RC arm clears a previous tilt latch
+      integral      = 0.0f;
+      trim_bias     = 0.0f;
+      vel_current   = 0.0f;
+      target_velocity = 0.0f;
+      encoderLeft = 0; encoderRight = 0;
+      prevEncoderLeft = 0; prevEncoderRight = 0;
+      // targetAngle is NOT reset here: it is the operator's trim, set from the
+      // GUI slider or Ch8, and arming should honour it rather than discard it.
+      Serial3.println("Motors ENABLED");   // string the GUI already parses
+    } else if (!armSwitch) {
+      rc_arm        = false;
+      motorsEnabled = false;
+      setMotors(0, 0);
+      integral = 0.0f; trim_bias = 0.0f; target_velocity = 0.0f;
+      Serial3.println("Motors DISABLED");
+    }
+  }
+
+  // ── Ch5: IMU calibrate (momentary button, rising edge) ───────────────────
+  // Guarded on !motorsEnabled: startCalibration() holds the motors off for its
+  // ~1 s sampling window, so triggering it while balancing drops the robot.
+  if (rc_raw[4] > 0) {
+    bool calSwitch = rcSwitchHigh(rc_raw[4], 4);
+    if (calSwitch && !rcPrevCal && !motorsEnabled) startCalibration();
+    rcPrevCal = calSwitch;
+  }
+
+  // ── Ch6: target = 0 (momentary button, rising edge) ──────────────────────
+  // "Stop here": clears the accumulated Ch8 trim and the state that would
+  // carry the old target forward — velocity setpoint, the outer loop's learned
+  // trim, and the encoder origin. Safe to press while balancing.
+  if (rc_raw[5] > 0) {
+    bool zeroSwitch = rcSwitchHigh(rc_raw[5], 5);
+    if (zeroSwitch && !rcPrevZero) {
+      targetAngle     = 0.0f;
+      target_velocity = 0.0f;
+      trim_bias       = 0.0f;
+      encoderLeft = 0; encoderRight = 0;
+      prevEncoderLeft = 0; prevEncoderRight = 0;
+      Serial3.println("RC:TARGET_ZEROED");
+    }
+    rcPrevZero = zeroSwitch;
+  }
+
+  // ── Ch9: leg selector (3-position switch) ────────────────────────────────
+  // Thresholds come from the channel's own calibration, so a TX whose 3-pos
+  // switch does not sit at 1000/1500/2000 still resolves: the two boundaries
+  // are placed a quarter and three quarters across the travel.
+  if (rc_raw[8] > 0) {
+    float u = rcUnipolar(rc_raw[8], 8);
+    rc_legSel = (u < 0.25f) ? 0 : ((u < 0.75f) ? 1 : 2);
+  }
+
+  // ── Ch10: crouch / stretch as a RATE, gated by Ch9 ───────────────────────
+  // Centre = hold. Off-centre moves the selected leg(s) at a rate: positive
+  // crouches, negative stretches.
+  //
+  // Why a rate and not a direct pot->depth map: startPoseMove() RESTARTS the
+  // trajectory interpolation every time it is called, so driving it from a
+  // jittering pot on every poll would continuously restart the move and the
+  // legs would never arrive anywhere. Integrating a rate and only re-issuing
+  // the move past a hysteresis threshold gives the trajectory engine a real,
+  // settled target.
+  rc_crouchAxis = rcAxisCal(rc_raw[9], 9);
+  if (rc_crouchAxis != 0.0f) {
+    float step = rcRateFromAxis(rc_crouchAxis, RC_CROUCH_RATE * 0.2f,
+                                RC_CROUCH_RATE) * integ_dt;
+    float newL = crouchOffsetL, newR = crouchOffsetR;
+    if      (rc_legSel == 0) { newL += step; newR += step; }  // mirrored
+    else if (rc_legSel == 1) { newL += step; }                // left only
+    else                     { newR += step; }                // right only
+    // Clamped independently, so driving one leg down does not eat the other's
+    // remaining travel.
+    newL = constrain(newL, 0.0f, RC_MAX_CROUCH);
+    newR = constrain(newR, 0.0f, RC_MAX_CROUCH);
+    // Hysteresis: only disturb the trajectory engine on a meaningful change.
+    if (fabsf(newL - crouchOffsetL) > 0.5f || fabsf(newR - crouchOffsetR) > 0.5f) {
+      crouchOffsetL = newL;
+      crouchOffsetR = newR;
+      if (poseMode == MODE_CROUCH) startPoseMove();
+    }
+  }
+}
+
 // ── SETUP ─────────────────────────────────────────────────────────────────────
 void setup() {
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial1.begin(115200);       // tick profiler out (PA9 = TX)
   Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
+
+  // FlySky iBUS in on Serial1 (PA10 RX) @ 115200 8N1. Decoded by rcFeedByte()
+  // from readRC() — no library, no timer, no ISR (see the decoder comment).
+  // If the receiver is set to a different protocol or baud, every byte here is
+  // garbage and the RXB/FRT telemetry counters show it: RXB climbs while FRT
+  // stays 0.
+  Serial1.begin(115200);
+  rcCalDefaults();   // nominal endpoints until the GUI sends RCC lines
 
   initAX12Legs();
 
@@ -1109,11 +1579,8 @@ void setup() {
   lastTime     = micros();
   lastPollTime = millis();
 
-  Serial3.println("BOOT:OK");
+  Serial3.println("BOOT:OK RC");
 
-  profResetWindow();
-  Serial1.println();
-  Serial1.println("# profiler: P period B body F free X overhead");
 }
 
 // ── MAIN LOOP (100 Hz) ────────────────────────────────────────────────────────
@@ -1121,17 +1588,18 @@ void loop() {
   unsigned long now = micros();
   if (now - lastTime < 10000) return;   // enforce 100 Hz
   float dt = (now - lastTime) * 1.0e-6f;
-  uint32_t prof_period = (uint32_t)(now - lastTime);
   lastTime = now;
 
-  uint32_t prof_t0 = micros();      // profiler: start of the loop body
-  uint32_t prof_m  = prof_t0;       // profiler: start of the current stage
+  // ── RC INPUT ─────────────────────────────────────────────────────────────
+  // First in the tick, so the stick values the control code below reads are
+  // the freshest available and a link loss disarms BEFORE the PID runs rather
+  // than one tick later. Must run EVERY tick — see RC_POLL_INTERVAL_MS.
+  readRC();
+
 
   // ── IMU ────────────────────────────────────────────────────────────────
   readIMU(dt);
-  prof_stage[0] = (uint16_t)(micros() - prof_m); prof_m = micros();   // I
   calibrationTask();   // accumulates this tick's sample when a cal is running
-  prof_stage[1] = (uint16_t)(micros() - prof_m); prof_m = micros();   // K
 
   // ── SAFETY CUTOFF ───────────────────────────────────────────────────────
   if (fabsf(pitch) > maxSafeTilt && motorsEnabled) {
@@ -1141,7 +1609,6 @@ void loop() {
     setMotors(0, 0);
     Serial3.println("SAFETY:CUTOFF");
   }
-  prof_stage[2] = (uint16_t)(micros() - prof_m); prof_m = micros();   // Y
 
   // ── ENCODER → VELOCITY (telemetry display only) ─────────────────────────
   long encL = encoderLeft;
@@ -1152,7 +1619,6 @@ void loop() {
   vel_current = vel_alpha * vel_current + (1.0f - vel_alpha) * vel_raw;
   prevEncoderLeft  = encL;
   prevEncoderRight = encR;
-  prof_stage[3] = (uint16_t)(micros() - prof_m); prof_m = micros();   // E
 
   // Leg torque is intentionally independent of motorsEnabled (the drive-wheel
   // arm state): pollLegServosTask() below keeps torque enabled and re-asserts
@@ -1178,7 +1644,14 @@ void loop() {
     // immediately; the I term learns the standing CoM/mounting offset that
     // used to need a hand re-trim. Both output DEGREES OF LEAN.
     if (autoTrimEnabled) {
-      float vel_error = 0.0f - vel_current;            // counts/s, want zero
+      // target_velocity is 0 when the Ch3 drive pot is centred, which makes
+      // this identical to the pre-RC firmware: any steady vel_current is then
+      // unwanted motion and gets leaned out. Deflect the pot and the SAME loop
+      // chases a non-zero velocity instead, leaning the robot to accelerate.
+      // A drive command belongs HERE and not on targetAngle: one authority
+      // over the setpoint, not two fighting. (targetAngle is the operator's
+      // trim, shared with the GUI slider and Ch8.)
+      float vel_error = target_velocity - vel_current;  // counts/s
       trim_bias += Ki_trim * vel_error * dt;
       trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
       lean_cmd   = (Kp_vel * vel_error) + trim_bias;
@@ -1203,11 +1676,24 @@ void loop() {
     float derivative = -gyroRate;            // derivative on measurement
     output = (Kp * error) + (Ki * integral) + (Kd * derivative);
 
-    int pwm = (int)constrain(-output, -255.0f, 255.0f);
-    setMotors(pwm, pwm);                      // no steering — pure balance
+    // ── STEERING — differential trim, applied AFTER the balance PID ────────
+    // The only correct place for it. The balance PID owns the COMMON component
+    // of the two motor outputs (that is what holds pitch); steering is the
+    // DIFFERENTIAL component, which pitch dynamics are blind to. Adding it to
+    // one wheel and subtracting from the other therefore turns the robot
+    // without eroding the balance loop's authority at all.
+    //
+    // Sign convention matches the L/R spin cases in blue_pill_dev/motor_testing
+    // and mcu_pos_wireless: positive steer = turn right = left wheel forward.
+    float steer = rc_arm ? (rc_steer * RC_MAX_STEER) : 0.0f;
+
+    float left_pwm  = -output + steer;
+    float right_pwm = -output - steer;
+
+    setMotors((int)constrain(left_pwm,  -255.0f, 255.0f),
+              (int)constrain(right_pwm, -255.0f, 255.0f));
   }
 
-  prof_stage[4] = (uint16_t)(micros() - prof_m); prof_m = micros();   // C
 
   // ── RX EVERY TICK, SERVO POLL AT 50 Hz ──────────────────────────────────
   // Uplink commands are latency-critical and the downlink was starving them,
@@ -1215,7 +1701,6 @@ void loop() {
   // health poll keeps its old 50 Hz slot — it is a slow, purely cosmetic read
   // and pollLegServosTask() already rate-limits itself to POLL_INTERVAL_MS.
   handleTelemetryRX();
-  prof_stage[5] = (uint16_t)(micros() - prof_m); prof_m = micros();   // R
 
   // ── SETTINGS PUSH (gated on POLL_IDLE to avoid collision with reply bytes) ──
   if (pollState == POLL_IDLE) applySettingsTask();
@@ -1244,7 +1729,6 @@ void loop() {
     isReadCycle = !isReadCycle;
     if (isReadCycle) pollLegServosTask();
   }
-  prof_stage[6] = (uint16_t)(micros() - prof_m); prof_m = micros();   // V
 
   // ── TELEMETRY @ 10 Hz ────────────────────────────────────────────────────
   // Halved from 20 Hz. The 3DR/SiK link is half-duplex with a TDM air protocol:
@@ -1262,13 +1746,18 @@ void loop() {
     int n = snprintf(line, sizeof(line),
       "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,"
       "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
-      "TORQ:%d,CR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d\n",
+      "TORQ:%d,CRL:%.1f,CRR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d,"
+      "RCL:%d,RCE:%d,RCA:%d,RCD:%.2f,RCS:%.2f,TVEL:%.1f,RCT:%.2f,RLS:%u,RCX:%.2f,RCB:%lu,FRT:%lu\n",
       pitch, output, integral, encL, encR, vel_current,
       (int)motorsEnabled, maxSafeTilt, lean_cmd,
       (int)autoTrimEnabled, (int)safetyLatched,
-      (int)g_torqueOn, crouchOffset,
+      (int)g_torqueOn, crouchOffsetL, crouchOffsetR,
       cur_x[0], cur_y[0], cur_x[1], cur_y[1],
-      (int)ikValid[0], (int)ikValid[1], (int)moveActive);
+      (int)ikValid[0], (int)ikValid[1], (int)moveActive,
+      (int)rcLinkOK, (int)rcEnabled, (int)rc_arm,
+      rc_drive, rc_steer, target_velocity, targetAngle,
+      (unsigned)rc_legSel, rc_crouchAxis, (unsigned long)rcRxBytes,
+      (unsigned long)rcFrameTotal);
     if (n > 0 && n < (int)sizeof(line) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)line, n);
 
@@ -1287,6 +1776,27 @@ void loop() {
         Serial3.write((uint8_t*)line, m);
     }
 
+    // ── RAW RC CHANNELS at 2 Hz ────────────────────────────────────────────
+    // All ten widths, so the operator can confirm which physical control
+    // drives which channel WITHOUT inferring it from robot behaviour — the
+    // single most common RC bring-up problem — and so the GUI calibration tab
+    // has live values to capture endpoints from. Sent on its own line and on a
+    // different divisor to the AX12 line so the two never land in the same
+    // tick and compete for the radio TX buffer.
+    static uint8_t rcStateDiv = 0;
+    if (++rcStateDiv >= 5) {
+      rcStateDiv = 0;
+      int r = snprintf(line, sizeof(line),
+        "RC:%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,LINK:%d,RXB:%lu,FR:%lu\n",
+        (unsigned)rc_raw[0], (unsigned)rc_raw[1], (unsigned)rc_raw[2],
+        (unsigned)rc_raw[3], (unsigned)rc_raw[4], (unsigned)rc_raw[5],
+        (unsigned)rc_raw[6], (unsigned)rc_raw[7], (unsigned)rc_raw[8],
+        (unsigned)rc_raw[9], (int)rcLinkOK,
+        (unsigned long)rcRxBytes, (unsigned long)rcFrameTotal);
+      if (r > 0 && r < (int)sizeof(line) && Serial3.availableForWrite() >= r)
+        Serial3.write((uint8_t*)line, r);
+    }
+
     // ── Servo health at 1 Hz (round-robin one servo per second) ─────────────
     static uint8_t healthIdx   = 0;
     static unsigned long lastHealth = 0;
@@ -1301,52 +1811,5 @@ void loop() {
       healthIdx = (healthIdx + 1) % 4;
     }
   }
-  prof_stage[7] = (uint16_t)(micros() - prof_m);                       // T
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // PROFILER EMIT — everything below is instrumentation, no control logic
-  // ══════════════════════════════════════════════════════════════════════════
-  // Body is sampled HERE, before anything below runs, so it excludes the
-  // profiler's own cost. That tax is reported separately as X (previous tick's,
-  // since this tick's is not knowable until after the write). Subtract X to get
-  // what the loop costs with profiling compiled out.
-  uint32_t prof_bodyU = micros() - prof_t0;
-  uint16_t prof_body  = (prof_bodyU > 65535) ? 65535 : (uint16_t)prof_bodyU;
-  profAccumulate(prof_body);
-
-  uint32_t prof_tp = micros();
-  {
-    char pb[128];
-    if (prof_report >= 0) {
-      // A 1 Hz report is in flight: one line per tick, raw row suppressed.
-      // Those ticks are still counted above — only their printing is skipped.
-      if (profReportLine(pb, sizeof(pb))) {
-        int n = (int)strlen(pb);
-        pb[n++] = '\n';
-        if (Serial1.availableForWrite() >= n) { Serial1.write((uint8_t*)pb, n); prof_report++; }
-      } else {
-        prof_report = -1;
-      }
-    } else {
-      int n = snprintf(pb, sizeof(pb), "P%lu B%u F%ld",
-                       (unsigned long)prof_period, (unsigned)prof_body,
-                       (long)(10000 - (int32_t)prof_body));
-      n += profStages(pb + n, (int)sizeof(pb) - n, prof_stage);
-      n += snprintf(pb + n, sizeof(pb) - n, " X%lu%s\n",
-                    (unsigned long)prof_printUs,
-                    (prof_body > 10000) ? " !OVR" : "");
-      if (n > 0 && n < (int)sizeof(pb) && Serial1.availableForWrite() >= n)
-        Serial1.write((uint8_t*)pb, n);
-      else if (prof_drop < 0xFFFF) prof_drop++;
-    }
-
-    // Roll the window once a second. Snapshot first so the report can be
-    // emitted over the following ticks while a fresh window accumulates.
-    static unsigned long profLastReport = 0;
-    if (prof_report < 0 && now - profLastReport >= 1000000) {
-      profLastReport = now;
-      profSnapshotReport();
-    }
-  }
-  prof_printUs = micros() - prof_tp;
 }

@@ -59,13 +59,48 @@ class SerialLink:
             "comp_slope":   4,
             "moving_speed": 0,
             "move_time_ms": 800,
-            "crouch":       0.0,
+            "crouch_l":     0.0,
+            "crouch_r":     0.0,
             "fx1": 1.0,   "fy1": -151.1,
             "fx2": -6.0,  "fy2": -149.6,
             "ik1_valid":    True,
             "ik2_valid":    True,
             "move_active":  False,
         }
+
+        # MCU state mirror — RC receiver (FlySky iBUS on PA10)
+        # link_ok mirrors the firmware failsafe: False means no checksum-valid
+        # frame for RC_TIMEOUT_MS, which disarms the motors on the MCU side.
+        # rc_enabled is the RE0/RE1 authority switch, NOT the link state.
+        # rx_bytes vs frames is the key diagnostic pair: bytes climbing while
+        # frames stays 0 means the receiver is talking a protocol/baud the
+        # decoder does not recognise (SBUS/PPM instead of iBUS), not a wiring
+        # fault. Both at 0 means nothing is arriving on PA10 at all.
+        self.rc = {
+            "link_ok":    False,
+            "rc_enabled": True,
+            "armed":      False,
+            "drive":      0.0,   # Ch3, -1..+1
+            "steer":      0.0,   # Ch4, -1..+1
+            "target_vel": 0.0,   # counts/sec commanded to the outer loop
+            "target_ang": 0.0,   # targetAngle in deg (shared with the GUI bar)
+            "leg_sel":    0,     # Ch9: 0=mirrored, 1=left, 2=right
+            "crouch_ax":  0.0,   # Ch10 raw axis, -1..+1
+            "rx_bytes":   0,
+            "frames":     0,
+            "channels":   [0] * 10,   # raw microseconds, Ch1..Ch10
+            # tuning knobs, echoed by the firmware's "Updated ->" ack
+            "max_vel":    400.0,
+            "max_steer":   40.0,
+            "max_crouch":  40.0,
+            "crouch_rate": 25.0,
+            "rate_min":     0.5,   # deg/sec
+            "rate_max":     5.0,   # deg/sec
+            "target_limit":20.0,   # deg
+        }
+        # Per-channel calibration mirror, populated by RCD -> RCCAL: lines.
+        # 1-based channel number -> (min, centre, max)
+        self.rc_cal = {}
 
         # Serial monitor log
         self.raw_log = []
@@ -257,8 +292,9 @@ class SerialLink:
                 self.raw_log.pop(0)
 
         clean_line = line
-        for prefix in ("PITCH:", "AX12:", "SRV:", "Updated ->", "BOOT:", "CAL:",
-                       "ACK:", "TRIM:", "SAFETY:", "Motors ", "FT:", "FA:"):
+        for prefix in ("PITCH:", "AX12:", "SRV:", "RCCAL:", "RC:", "Updated ->",
+                       "BOOT:", "CAL:", "ACK:", "NAK:", "TRIM:", "SAFETY:",
+                       "Motors ", "FT:", "FA:"):
             idx = line.find(prefix)
             if idx != -1:
                 clean_line = line[idx:]
@@ -287,6 +323,15 @@ class SerialLink:
             self._parse_ax12_state(clean_line)
         elif clean_line.startswith("SRV:"):
             self._parse_servo_health(clean_line)
+        elif clean_line.startswith("RCCAL:"):
+            self._parse_rc_cal(clean_line)
+        elif clean_line.startswith("RC:TARGET_ZEROED"):
+            # Ch6 button — the firmware zeroed targetAngle and the trim.
+            with self._lock:
+                self.fw["targetAngle"] = 0.0
+                self.rc["target_ang"] = 0.0
+        elif clean_line.startswith("RC:"):
+            self._parse_rc_channels(clean_line)
         elif clean_line.startswith("Updated ->"):
             self._parse_fw_update(clean_line)
         elif clean_line.startswith("CAL:DONE"):
@@ -305,6 +350,9 @@ class SerialLink:
         elif clean_line.startswith("ACK:AUTOTRIM_"):
             with self._lock:
                 self.auto_trim_on = clean_line.endswith("ON")
+        elif clean_line.startswith("ACK:RC_"):
+            with self._lock:
+                self.rc["rc_enabled"] = clean_line.endswith("ON")
         elif clean_line.startswith("ACK:TORQUE_"):
             with self._lock:
                 self.ax12["torque_on"] = clean_line.endswith("ON")
@@ -349,8 +397,10 @@ class SerialLink:
             # AX-12 leg subsystem fields (extended telemetry)
             if "TORQ" in data:
                 self.ax12["torque_on"]   = bool(int(data["TORQ"]))
-            if "CR"   in data:
-                self.ax12["crouch"]      = data["CR"]
+            if "CRL"  in data:
+                self.ax12["crouch_l"]    = data["CRL"]
+            if "CRR"  in data:
+                self.ax12["crouch_r"]    = data["CRR"]
             if "FX1"  in data:
                 self.ax12["fx1"]         = data["FX1"]
             if "FY1"  in data:
@@ -365,6 +415,33 @@ class SerialLink:
                 self.ax12["ik2_valid"]   = bool(int(data["IK2"]))
             if "MOVE" in data:
                 self.ax12["move_active"] = bool(int(data["MOVE"]))
+
+            # ── RC receiver fields ──────────────────────────────────────────
+            if "RCL"  in data:
+                self.rc["link_ok"]    = bool(int(data["RCL"]))
+            if "RCE"  in data:
+                self.rc["rc_enabled"] = bool(int(data["RCE"]))
+            if "RCA"  in data:
+                self.rc["armed"]      = bool(int(data["RCA"]))
+            if "RCD"  in data:
+                self.rc["drive"]      = data["RCD"]
+            if "RCS"  in data:
+                self.rc["steer"]      = data["RCS"]
+            if "TVEL" in data:
+                self.rc["target_vel"] = data["TVEL"]
+            if "RCT"  in data:
+                # targetAngle, which Ch8 and the GUI "Target" bar share. Mirror
+                # it into fw as well so the slider follows the transmitter.
+                self.rc["target_ang"] = data["RCT"]
+                self.fw["targetAngle"] = data["RCT"]
+            if "RLS"  in data:
+                self.rc["leg_sel"]    = int(data["RLS"])
+            if "RCX"  in data:
+                self.rc["crouch_ax"]  = data["RCX"]
+            if "RCB"  in data:
+                self.rc["rx_bytes"]   = int(data["RCB"])
+            if "FRT"  in data:
+                self.rc["frames"]     = int(data["FRT"])
 
             if len(self.history["t"]) > 500:
                 for k in self.history:
@@ -399,8 +476,10 @@ class SerialLink:
                 self.ax12["moving_speed"]  = int(data["MS"])
             if "MT"   in data:
                 self.ax12["move_time_ms"]  = int(data["MT"])
-            if "CR"   in data:
-                self.ax12["crouch"]        = data["CR"]
+            if "CRL"  in data:
+                self.ax12["crouch_l"]      = data["CRL"]
+            if "CRR"  in data:
+                self.ax12["crouch_r"]      = data["CRR"]
             if "FX1"  in data:
                 self.ax12["fx1"]           = data["FX1"]
             if "FY1"  in data:
@@ -415,6 +494,54 @@ class SerialLink:
                 self.ax12["ik2_valid"]     = bool(int(data["IK2"]))
             if "MOVE" in data:
                 self.ax12["move_active"]   = bool(int(data["MOVE"]))
+
+    def _parse_rc_channels(self, line):
+        """Parses: RC:<ch1..ch10>,LINK:<0|1>,RXB:<n>,FR:<n>
+
+        Ten raw channel widths in microseconds, then the link flag and the two
+        diagnostic counters. A channel the receiver never populated reads 0 and
+        is KEPT as 0 rather than coerced to a midpoint — "no data" and "centred
+        stick" must stay distinguishable in the UI. This line exists so the
+        channel map can be verified against the physical transmitter and so a
+        calibration tab has live values to capture endpoints from.
+        """
+        try:
+            _, payload = line.split(":", 1)
+            parts = payload.split(",")
+            chans = []
+            for i in range(10):
+                try:
+                    chans.append(int(float(parts[i])))
+                except (IndexError, ValueError):
+                    chans.append(0)
+            extras = {}
+            for part in parts[10:]:
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    try:
+                        extras[k.strip()] = int(float(v))
+                    except ValueError:
+                        pass
+            with self._lock:
+                self.rc["channels"] = chans
+                if "LINK" in extras:
+                    self.rc["link_ok"]  = bool(extras["LINK"])
+                if "RXB"  in extras:
+                    self.rc["rx_bytes"] = extras["RXB"]
+                if "FR"   in extras:
+                    self.rc["frames"]   = extras["FR"]
+        except (ValueError, IndexError):
+            pass
+
+    def _parse_rc_cal(self, line):
+        """Parses: RCCAL:<ch>,<min>,<centre>,<max>   (ch is 1-based)"""
+        try:
+            _, payload = line.split(":", 1)
+            ch, mn, cen, mx = (int(float(x)) for x in payload.split(",")[:4])
+            with self._lock:
+                self.rc_cal[ch] = (mn, cen, mx)
+        except (ValueError, IndexError):
+            pass
 
     def _parse_servo_health(self, line):
         """Parses: SRV:<id>,<temp>,<load%>[,<err>,<fail>]
@@ -455,7 +582,11 @@ class SerialLink:
             "P": "Kp", "I": "Ki", "D": "Kd",
             "Offset": "pitchOffset",
             "Target": "targetAngle", "Alpha": "alpha", "Tilt": "maxSafeTilt",
-            "TrimGain": "Ki_trim", "Crouch": "crouchOffset", "VP": "Kp_vel",
+            "TrimGain": "Ki_trim", "CrouchL": "crouchOffsetL", "CrouchR": "crouchOffsetR",
+            "VP": "Kp_vel",
+            "RV": "RC_MAX_VEL", "RS": "RC_MAX_STEER", "RCM": "RC_MAX_CROUCH",
+            "RCR": "RC_CROUCH_RATE", "RTN": "RC_TARGET_RATE_MIN",
+            "RTX": "RC_TARGET_RATE_MAX", "RTL": "RC_TARGET_LIMIT",
         }
         try:
             _, payload = line.split("->", 1)
@@ -472,10 +603,33 @@ class SerialLink:
                             pass
             with self._lock:
                 self.fw.update(new_fw)
+                # Mirror the RC knobs into self.rc too, so a UI reading RC
+                # state has one place to look instead of straddling two dicts.
+                for fw_key, rc_key in (
+                    ("RC_MAX_VEL", "max_vel"),
+                    ("RC_MAX_STEER", "max_steer"),
+                    ("RC_MAX_CROUCH", "max_crouch"),
+                    ("RC_CROUCH_RATE", "crouch_rate"),
+                    ("RC_TARGET_RATE_MIN", "rate_min"),
+                    ("RC_TARGET_RATE_MAX", "rate_max"),
+                    ("RC_TARGET_LIMIT", "target_limit"),
+                ):
+                    if fw_key in new_fw:
+                        self.rc[rc_key] = new_fw[fw_key]
         except Exception:
             pass
 
     # ── DATA ACCESS ──────────────────────────────────────────────────────────
+    def get_rc_state(self):
+        with self._lock:
+            state = dict(self.rc)
+            state["channels"] = list(self.rc["channels"])
+            return state
+
+    def get_rc_cal(self):
+        with self._lock:
+            return dict(self.rc_cal)
+
     def snapshot(self):
         with self._lock:
             return {k: list(v) for k, v in self.history.items()}
@@ -517,9 +671,40 @@ class SerialLink:
     def set_auto_trim(self, enabled):  self._send(f"TE{1 if enabled else 0}")
     def commit_trim(self):             self._send("TC")
 
-    def set_crouch(self, val):         self._send(f"CR{val}")
+    def set_crouch(self, val):         self._send(f"CR{val}")     # both legs (mirrored)
+    def set_crouch_l(self, val):       self._send(f"CRL{val}")
+    def set_crouch_r(self, val):       self._send(f"CRR{val}")
     # Outer velocity-loop P gain: deg of lean per (count/s) of velocity error.
     def set_vel_p(self, val):          self._send(f"VP{val}")
+
+    # ── RC control ───────────────────────────────────────────────────────────
+    # RE0 parks the transmitter's authority so GUI sliders can be used on the
+    # bench with a live TX nearby. It does NOT disarm (pulling authority from a
+    # balancing robot would drop it) and does NOT stop the failsafe. The Ch7
+    # switch still works as a kill switch under RE0.
+    def set_rc_enabled(self, enabled):  self._send(f"RE{1 if enabled else 0}")
+    def set_rc_max_vel(self, val):      self._send(f"RV{val}")
+    def set_rc_max_steer(self, val):    self._send(f"RS{val}")
+    def set_rc_max_crouch(self, val):   self._send(f"RCM{val}")
+    def set_rc_crouch_rate(self, val):  self._send(f"RCR{val}")
+
+    # Ch8 target-rate band, in DEGREES/sec — Ch8 drives targetAngle, the same
+    # variable the "Target" slider sets, so these are deg/sec and deg.
+    def set_rc_rate_min(self, val):     self._send(f"RTN{val}")
+    def set_rc_rate_max(self, val):     self._send(f"RTX{val}")
+    def set_rc_target_limit(self, val): self._send(f"RTL{val}")
+
+    # ── RC calibration ───────────────────────────────────────────────────────
+    # Channel numbers are 1-BASED here and in the firmware, matching the
+    # transmitter's own labelling. The firmware validates
+    # (500 <= min < centre < max <= 2500) and NAKs a bad line, keeping the
+    # previous values — a calibration with min >= centre would make the axis
+    # maths divide by a negative span and invert the channel.
+    def set_rc_calibration(self, ch, vmin, vcen, vmax):
+        self._send(f"RCC{int(ch)},{int(vmin)},{int(vcen)},{int(vmax)}")
+
+    def request_rc_calibration(self):   self._send("RCD")
+    def reset_rc_calibration(self):     self._send("RCZ")
     def set_servo_position(self, servo_id, pos):
         self._send(f"PS{int(servo_id)} {int(pos)}")
 

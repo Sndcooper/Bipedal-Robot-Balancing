@@ -56,7 +56,8 @@ PARAM_SPECS = [
     # standing CoM offset over ~10 s. Both output DEGREES OF LEAN, not PWM.
     ParamSpec("Kp_vel",      "Vel P (lean)",0.0, 0.02, 0.0005, 0.002, 0.0001, 5, 0.0030),
     ParamSpec("Ki_trim",     "Vel I (trim)",0.0, 0.03, 0.001,  0.003, 0.0001, 5, 0.0015),
-    ParamSpec("crouchOffset","Crouch",   0.0,  80.0, 1.0,  10.0,  0.1,    1,   0.0),
+    ParamSpec("crouchOffsetL","Crouch L",0.0,  80.0, 1.0,  10.0,  0.1,    1,   0.0),
+    ParamSpec("crouchOffsetR","Crouch R",0.0,  80.0, 1.0,  10.0,  0.1,    1,   0.0),
 ]
 
 # IK foot-target parameters (mm)
@@ -95,6 +96,16 @@ class CoarseFineSlider(ttk.Frame):
         self._awaiting_echo     = False
         self._echo_deadline     = 0.0
 
+        # Slider range, EDITABLE at runtime via the Min/Max boxes below.
+        # Held per-instance rather than written back into `spec`, because
+        # ParamSpec objects are shared module-level singletons: mutating one
+        # would change every other row built from the same spec. spec.coarse_*
+        # therefore stays the factory default that "Rst" restores.
+        self._lo = float(spec.coarse_min)
+        self._hi = float(spec.coarse_max)
+        self._lo_value = tk.StringVar(value=self._fmt_lim(self._lo))
+        self._hi_value = tk.StringVar(value=self._fmt_lim(self._hi))
+
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=0)
         self.columnconfigure(2, weight=0)
@@ -112,7 +123,7 @@ class CoarseFineSlider(ttk.Frame):
 
         self._scale = tk.Scale(
             self, orient=tk.HORIZONTAL, showvalue=False,
-            resolution=spec.coarse_step, from_=spec.coarse_min, to=spec.coarse_max,
+            resolution=spec.coarse_step, from_=self._lo, to=self._hi,
             variable=self._value, command=self._on_change, length=180,
         )
         self._scale.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 5), pady=(0, 2))
@@ -123,9 +134,80 @@ class CoarseFineSlider(ttk.Frame):
                         command=self._apply_zoom_mode).grid(
             row=1, column=2, sticky="w", padx=(5, 0), pady=(0, 2))
 
+        # ── Editable slider range ───────────────────────────────────────────
+        # Committed on Return or focus-out, so a half-typed number is never
+        # applied. "Rst" restores the spec defaults.
+        lim = ttk.Frame(self)
+        lim.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 3))
+        ttk.Label(lim, text="min", font=("Helvetica", 7)).pack(side=tk.LEFT)
+        self._lo_entry = ttk.Entry(lim, textvariable=self._lo_value, width=7)
+        self._lo_entry.pack(side=tk.LEFT, padx=(2, 6))
+        ttk.Label(lim, text="max", font=("Helvetica", 7)).pack(side=tk.LEFT)
+        self._hi_entry = ttk.Entry(lim, textvariable=self._hi_value, width=7)
+        self._hi_entry.pack(side=tk.LEFT, padx=(2, 4))
+        ttk.Button(lim, text="Rst", width=4,
+                   command=self._reset_limits).pack(side=tk.LEFT)
+        for w in (self._lo_entry, self._hi_entry):
+            w.bind("<Return>",   self._on_limit_commit)
+            w.bind("<FocusOut>", self._on_limit_commit)
+            # The limit boxes must not be mistaken for the VALUE entry: that
+            # flag suppresses telemetry-driven refresh of the value field, and
+            # leaving it set here would freeze the readout while a limit box
+            # holds focus.
+            w.bind("<FocusIn>",  lambda e: None)
+
         self._apply_zoom_mode()
 
     def _fmt(self, v): return f"{v:.{self.spec.digits}f}"
+
+    def _fmt_lim(self, v):
+        # Limits are shown with the parameter's own precision, so a gain whose
+        # useful range is 0..0.02 does not display its bounds as "0.00".
+        return f"{v:.{self.spec.digits}f}"
+
+    def _on_limit_commit(self, _e=None):
+        """Validate and apply the typed range.
+
+        Rejects anything that would make the slider unusable -- non-numeric, or
+        min >= max -- by restoring the boxes to the live values rather than
+        applying a broken range. tk.Scale accepts from_ > to silently and then
+        behaves inverted, which looks like a firmware fault, so it is refused
+        here instead.
+        """
+        try:
+            lo = float(self._lo_value.get())
+            hi = float(self._hi_value.get())
+        except (TypeError, ValueError):
+            self._refresh_limit_boxes()
+            return "break"
+        if not (hi > lo):
+            self._refresh_limit_boxes()
+            return "break"
+
+        self._lo, self._hi = lo, hi
+        # Re-apply the current zoom mode so the new range takes effect through
+        # the single code path that configures the scale.
+        self._apply_zoom_mode()
+        # The live value may now sit outside the range. Clamp it locally but do
+        # NOT send: narrowing a slider is a display choice, and silently
+        # pushing a new gain to a balancing robot because its range was
+        # retyped would be a genuine hazard.
+        cur = float(self._value.get())
+        clamped = self._clamp(cur)
+        if abs(clamped - cur) > 1e-12:
+            self.set_value(clamped, send=False)
+        self._refresh_limit_boxes()
+        return "break"
+
+    def _refresh_limit_boxes(self):
+        self._lo_value.set(self._fmt_lim(self._lo))
+        self._hi_value.set(self._fmt_lim(self._hi))
+
+    def _reset_limits(self):
+        self._lo = float(self.spec.coarse_min)
+        self._hi = float(self.spec.coarse_max)
+        self._apply_zoom_mode()
+        self._refresh_limit_boxes()
 
     def _quantize(self, v):
         step = float(self._scale.cget("resolution"))
@@ -158,13 +240,15 @@ class CoarseFineSlider(ttk.Frame):
     def _apply_zoom_mode(self):
         cur = float(self._value.get())
         if self._zoom.get():
-            lo = max(cur - self.spec.fine_span, self.spec.coarse_min)
-            hi = min(cur + self.spec.fine_span, self.spec.coarse_max)
+            # Zoom spans fine_span either side of the current value, clipped to
+            # the (possibly retyped) range rather than the spec default.
+            lo = max(cur - self.spec.fine_span, self._lo)
+            hi = min(cur + self.spec.fine_span, self._hi)
             if hi - lo < self.spec.fine_step:
-                hi = min(self.spec.coarse_max, lo + self.spec.fine_step)
+                hi = min(self._hi, lo + self.spec.fine_step)
             self._scale.configure(from_=lo, to=hi, resolution=self.spec.fine_step)
         else:
-            self._scale.configure(from_=self.spec.coarse_min, to=self.spec.coarse_max,
+            self._scale.configure(from_=self._lo, to=self._hi,
                                   resolution=self.spec.coarse_step)
         self._scale.set(self._clamp(cur))
         v = float(self._value.get())
@@ -328,6 +412,13 @@ class BalanceTunerTab(ttk.Frame):
             ctrl = CoarseFineSlider(tuning_frame, spec, spec.start_val, self._on_slider)
             ctrl.pack(fill=tk.X, pady=4, padx=5)
             self.sliders[spec.key] = ctrl
+            if spec.key == "crouchOffsetR":
+                # Mirror sits right under the L/R crouch pair it links.
+                self.crouch_mirror_var = tk.BooleanVar(value=True)
+                ttk.Checkbutton(
+                    tuning_frame, text="Mirror L↔R Crouch",
+                    variable=self.crouch_mirror_var
+                ).pack(anchor="w", padx=5, pady=(0, 4))
 
         # Save tuned values with comment button
         btn_save = ttk.Button(
@@ -371,7 +462,18 @@ class BalanceTunerTab(ttk.Frame):
         elif key == "maxSafeTilt": lk.set_tilt(val)
         elif key == "Ki_trim":     lk.set_trim_gain(val)
         elif key == "Kp_vel":      lk.set_vel_p(val)
-        elif key == "crouchOffset":lk.set_crouch(val)
+        elif key == "crouchOffsetL":
+            if self.crouch_mirror_var.get():
+                self.sliders["crouchOffsetR"].set_value(val)
+                lk.set_crouch(val)
+            else:
+                lk.set_crouch_l(val)
+        elif key == "crouchOffsetR":
+            if self.crouch_mirror_var.get():
+                self.sliders["crouchOffsetL"].set_value(val)
+                lk.set_crouch(val)
+            else:
+                lk.set_crouch_r(val)
 
     def update_tab(self):
         app = self.app
