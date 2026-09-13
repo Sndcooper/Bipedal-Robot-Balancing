@@ -77,13 +77,18 @@ moving the robot.
   L298N Motor IN3   │ PB12                  PB6 │ MPU6050 SCL (I2C1)
   L298N Motor IN4   │ PB13                  PB7 │ MPU6050 SDA (I2C1)
                     │                           │
- AX-12 Bus TX (1M)  │ PA2                   PA9 │ 3DR Radio TX (USART1 @ 115k)
- AX-12 Bus RX (1M)  │ PA3                  PA10 │ 3DR Radio RX (USART1 @ 115k)
+ AX-12 Bus TX (1M)  │ PA2                  PA11 │ 3DR Radio TX (USART6 @ 115k)
+ AX-12 Bus RX (1M)  │ PA3                  PA12 │ 3DR Radio RX (USART6 @ 115k)
                     └───────────────────────────┘
 ```
 
 Encoders provide both the position error and velocity damping used by the
 outer position-hold loop.
+
+For the F401 FTDI configuration, the 3DR radio is on USART6: PA11 TX to radio
+RX, PA12 RX from radio TX, and shared GND. PA9/PA10 are reserved for the FTDI
+connection: FTDI RX to PA9, FTDI TX to PA10, and GND to GND. The firmware
+mirrors telemetry and commands to both UART links at 115200 baud.
 
 ---
 
@@ -148,7 +153,7 @@ SRV:<id>,<temp>,<load%>            # one servo per frame, round-robin
 ## 🚀 Running
 
 ```bash
-cd firmware && pio run -t upload      # ST-Link over SWD; BOOT0 stays at 0
+cd firmware && pio run -t upload      # FTDI: BOOT0 HIGH, reset, then select COMx
 python gui/main_gui.py                # connect to the 3DR COM port @ 115200
 ```
 
@@ -158,7 +163,7 @@ right way and settles; if it inverts/runs away, flip `GYRO_PITCH_SIGN` in
 
 ---
 
-## Tick profiler (Serial1 → COM3)
+## Tick profiler
 
 **Instrumentation only.** Not one line of control logic was altered to add this:
 no stage reordered, no timing changed, nothing optimised. Verified by stripping
@@ -167,11 +172,9 @@ version — zero residual code differences. The numbers therefore describe the
 firmware you already trust, which is the whole point of measuring it rather than
 rewriting it.
 
-Output goes to `Serial1` (**PA9 = TX**, 115200) — a plain wired UART, *not* the
-3DR radio. Sending profiling data over the link whose airtime starvation you are
-characterising would perturb the very thing being measured. Wire PA9 to a
-USB-TTL RX and share ground; PA10 is unused, so the port is output-only and a
-stray terminal keystroke can never reach the balancer.
+Profiler UART output is disabled in this configuration because USART6 is used
+by the 3DR telemetry radio. PA9/PA10 are reserved for FTDI uploading and the
+wired serial monitor.
 
 ### Stream 1 — one raw row per 100 Hz tick
 

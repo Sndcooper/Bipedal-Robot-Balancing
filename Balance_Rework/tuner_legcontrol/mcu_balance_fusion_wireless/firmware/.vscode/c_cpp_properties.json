@@ -100,6 +100,7 @@
                 "HAL_UART_MODULE_ENABLED",
                 "ENABLE_HWSERIAL1",
                 "ENABLE_HWSERIAL6",
+                "ENABLE_TICK_PROFILER=0",
                 "SERIAL_TX_BUFFER_SIZE=384",
                 "SERIAL_RX_BUFFER_SIZE=256",
                 "STM32F4xx",

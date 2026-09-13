@@ -7,7 +7,7 @@ variant under Balance_Rework/tuner_legcontrol.
 
 - MCU: STM32F401xD, reported by CubeProgrammer as device ID 0x433 with 384 KB flash.
 - PlatformIO board: genericSTM32F401CD.
-- Upload/debugger: ST-Link over SWD. BOOT0 stays LOW; no FTDI boot sequence is required.
+- Upload/debugger: ST-Link over SWD, or FTDI through the STM32 ROM bootloader.
 
 | ST-Link | Black Pill |
 | --- | --- |
@@ -19,6 +19,20 @@ variant under Balance_Rework/tuner_legcontrol.
 
 Never connect the ST-Link 3V3 supply while the robot external 5 V buck is
 already powering the Black Pill.
+
+### FTDI upload and wired COM port (USART1)
+
+| FTDI | Black Pill |
+| --- | --- |
+| TX | PA10 (USART1 RX) |
+| RX | PA9 (USART1 TX) |
+| GND | GND |
+
+Use 3.3 V UART logic. With BOOT0 HIGH, reset the board and upload through the
+`blackpill_f401cd_ftdi` PlatformIO environment. Then return BOOT0 LOW and reset;
+the same FTDI connection is a 115200 baud wired COM port. It mirrors the 3DR
+telemetry and accepts the same commands. Do not connect the FTDI power pin when
+the Black Pill is already powered by the robot buck.
 
 ## Standard motor, encoder, IMU, and AX-12 pins
 
@@ -55,7 +69,7 @@ STM32F401 has no USART3. Do not connect a radio to old F103 pins PB10/PB11.
 
 | Variant | 3DR radio UART | Black Pill TX to radio RX | Black Pill RX from radio TX | Notes |
 | --- | --- | --- | --- | --- |
-| mcu_balance_fusion_wireless | USART1 | PA9 | PA10 | Profiler moves to PA11. |
+| mcu_balance_fusion_wireless | USART6 | PA11 | PA12 | Telemetry is mirrored to FTDI USART1 on PA9/PA10. |
 | mcu_ik_engine_pretest_wireless | USART1 | PA9 | PA10 | Profiler moves to PA11. |
 | mcu_ik_engine_wireless | USART1 | PA9 | PA10 | |
 | mcu_pos_wireless | USART1 | PA9 | PA10 | |

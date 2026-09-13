@@ -1,6 +1,6 @@
 // ============================================================================
 // mcu_balance_fusion_wireless — STAGE 2: SENSOR-FUSION BALANCER (copied from pretest_wireless v1)
-// STM32F401CD Black Pill | 3DR telemetry USART1 (PA9/PA10 @ 115200)
+// STM32F401CD Black Pill | 3DR telemetry USART6 (PA11/PA12 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud) | MPU6050 I2C1 (PB6/PB7)
 // ----------------------------------------------------------------------------
 // Two-loop position-hold controller: a fast pitch PID keeps the body upright;
@@ -13,9 +13,48 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// STM32F401 Black Pill: USART3 does not exist; 3DR uses USART1 (PA9/PA10).
-#define Serial3 Serial1
+// STM32F401 has no USART3. The telemetry protocol is mirrored to the 3DR radio
+// (USART6) and the wired FTDI console (USART1).
 extern HardwareSerial Serial6;
+extern HardwareSerial Serial1;
+
+class MirroredSerial : public Stream {
+ public:
+  MirroredSerial(HardwareSerial &wireless, HardwareSerial &wired)
+      : wireless_(wireless), wired_(wired) {}
+
+  void begin(unsigned long baud) { wireless_.begin(baud); wired_.begin(baud); }
+  int available() override { return wireless_.available() + wired_.available(); }
+  int read() override {
+    return wireless_.available() ? wireless_.read() : wired_.read();
+  }
+  int peek() override {
+    return wireless_.available() ? wireless_.peek() : wired_.peek();
+  }
+  void flush() override { wireless_.flush(); wired_.flush(); }
+  int availableForWrite() {
+    int a = wireless_.availableForWrite();
+    int b = wired_.availableForWrite();
+    return a < b ? a : b;
+  }
+  size_t write(uint8_t c) override {
+    size_t a = wireless_.write(c);
+    size_t b = wired_.write(c);
+    return (a && b) ? 1 : 0;
+  }
+  size_t write(const uint8_t *buf, size_t len) override {
+    size_t a = wireless_.write(buf, len);
+    size_t b = wired_.write(buf, len);
+    return a < b ? a : b;
+  }
+
+ private:
+  HardwareSerial &wireless_;
+  HardwareSerial &wired_;
+};
+
+MirroredSerial telemetry(Serial6, Serial1);
+#define Serial3 telemetry
 
 // ── ENCODER PINS (velocity telemetry only — not used for control) ────────────
 #define ENC_L_A PA6
@@ -40,9 +79,7 @@ void countRight() { if (digitalRead(ENC_R_B)) encoderRight--; else encoderRight+
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
-extern HardwareSerial Serial1;   // 3DR radio (PA9 TX / PA10 RX)
 extern HardwareSerial Serial2;   // AX-12 bus
-extern HardwareSerial Serial3;   // 3DR radio
 
 // ============================================================================
 // TICK PROFILER — how much of the 10 ms is consumed, and by what
@@ -1102,8 +1139,7 @@ void setup() {
   analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial6.begin(115200);       // tick profiler out (PA11 = TX)
-  Serial3.begin(115200);       // 3DR radio
+  Serial3.begin(115200);       // USART6: 3DR radio on PA11 TX / PA12 RX
   Serial2.begin(1000000);      // AX-12 bus
 
   initAX12Legs();
@@ -1128,8 +1164,6 @@ void setup() {
   Serial3.println("BOOT:OK");
 
   profResetWindow();
-  Serial6.println();
-  Serial6.println("# profiler: P period B body F free X overhead");
 }
 
 // ── MAIN LOOP (100 Hz) ────────────────────────────────────────────────────────
@@ -1328,6 +1362,7 @@ void loop() {
   // profiler's own cost. That tax is reported separately as X (previous tick's,
   // since this tick's is not knowable until after the write). Subtract X to get
   // what the loop costs with profiling compiled out.
+#if ENABLE_TICK_PROFILER
   uint32_t prof_bodyU = micros() - prof_t0;
   uint16_t prof_body  = (prof_bodyU > 65535) ? 65535 : (uint16_t)prof_bodyU;
   profAccumulate(prof_body);
@@ -1367,4 +1402,5 @@ void loop() {
     }
   }
   prof_printUs = micros() - prof_tp;
+#endif
 }
