@@ -1,66 +1,20 @@
 // ============================================================================
 // mcu_balance_fusion_wireless — STAGE 2: SENSOR-FUSION BALANCER (copied from pretest_wireless v1)
-// STM32F103C8 Blue Pill | 3DR telemetry USART3 (PB10/PB11 @ 115200)
+// STM32 Bluepill F103C8 | 3DR telemetry Serial3 (PB10/PB11 @ 115200)
 // AX-12 bus Serial2 (PA2/PA3 @ 1 Mbaud) | MPU6050 I2C1 (PB6/PB7)
 // ----------------------------------------------------------------------------
-// Two-loop position-hold controller: a fast pitch PID keeps the body upright;
-// a deliberately slow encoder position/velocity loop requests a small lean so
-// the robot returns to the point where position hold was armed. No IK, RC, or
-// steering is mixed into the wheel controller. A tiny PING->PONG responder is
-// kept so latency_test.py works.
+// Deliberately ONE control loop only: a single balance PID (Kp,Ki,Kd) acting on
+// complementary-filtered pitch. No cascade (velocity/position), no IK, no RC,
+// no steering. Legs are held in the calibrated standing pose and polled for
+// health only. Encoder velocity is computed for DISPLAY telemetry and is not
+// fed into control EXCEPT by the opt-in auto-trim add-on below (off by
+// default), which nudges the trim bias to null steady drift instead of
+// requiring a hand re-trim after every gain change. A tiny PING->PONG
+// responder is kept so latency_test.py works.
 // ============================================================================
 
 #include <Arduino.h>
 #include <Wire.h>
-
-// Blue Pill: the telemetry protocol is mirrored to the 3DR radio on USART3
-// (PB10 TX / PB11 RX) and the wired FTDI console on USART1 (PA9 TX / PA10 RX).
-extern HardwareSerial Serial3;
-extern HardwareSerial Serial1;
-
-class MirroredSerial : public Stream {
- public:
-  MirroredSerial(HardwareSerial &wireless, HardwareSerial &wired)
-      : wireless_(wireless), wired_(wired) {}
-
-  void begin(unsigned long baud) { wireless_.begin(baud); wired_.begin(baud); }
-  int available() override { return wireless_.available() + wired_.available(); }
-  int read() override {
-    return wireless_.available() ? wireless_.read() : wired_.read();
-  }
-  int peek() override {
-    return wireless_.available() ? wireless_.peek() : wired_.peek();
-  }
-  void flush() override { wireless_.flush(); wired_.flush(); }
-  int availableForWrite() {
-    int a = wireless_.availableForWrite();
-    int b = wired_.availableForWrite();
-    return a < b ? a : b;
-  }
-  size_t write(uint8_t c) override {
-    size_t a = wireless_.write(c);
-    size_t b = wired_.write(c);
-    return (a && b) ? 1 : 0;
-  }
-  size_t write(const uint8_t *buf, size_t len) override {
-    size_t a = wireless_.write(buf, len);
-    size_t b = wired_.write(buf, len);
-    return a < b ? a : b;
-  }
-
- private:
-  HardwareSerial &wireless_;
-  HardwareSerial &wired_;
-};
-
-MirroredSerial telemetry(Serial3, Serial1);
-#define Serial3 telemetry
-
-// The Blue Pill has no USART6 and no spare UART left: USART2 is the AX-12 bus,
-// USART3 is the radio, USART1 is the wired console. If the tick profiler is
-// switched on it therefore shares the wired console, interleaving profiler rows
-// with the mirrored telemetry. Keep ENABLE_TICK_PROFILER=0 for flight.
-#define Serial6 Serial1
 
 // ── ENCODER PINS (velocity telemetry only — not used for control) ────────────
 #define ENC_L_A PA6
@@ -85,7 +39,9 @@ void countRight() { if (digitalRead(ENC_R_B)) encoderRight--; else encoderRight+
 #define IN4 PB13
 
 // ── SERIAL PORTS (instantiated via build_flags) ──────────────────────────────
+extern HardwareSerial Serial1;   // tick profiler out (PA9 TX) — OUTPUT ONLY
 extern HardwareSerial Serial2;   // AX-12 bus
+extern HardwareSerial Serial3;   // 3DR radio
 
 // ============================================================================
 // TICK PROFILER — how much of the 10 ms is consumed, and by what
@@ -95,7 +51,7 @@ extern HardwareSerial Serial2;   // AX-12 bus
 // numbers therefore describe the firmware you already trust, which is the whole
 // point of measuring it rather than rewriting it.
 //
-// Output is USART1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
+// Output is Serial1 (PA9 = TX) at 115200 — a plain wired UART, deliberately NOT
 // the 3DR radio. Sending profiling data over the link whose airtime starvation
 // you are trying to characterise would perturb the very thing being measured.
 //
@@ -273,35 +229,44 @@ float maxSafeTilt = 25.0f;                  // safety cutoff threshold (deg)
 // Logged sessions showed it pinned at the clamp while the robot fell over.
 const float MAX_INTEGRAL_PWM = 64.0f;       // 25% of range, leaves Kp/Kd headroom
 
-// ── ENCODER POSITION AND VELOCITY ───────────────────────────────────────────
+// ── ENCODER VELOCITY (telemetry display; also feeds auto-trim below) ────────
 float vel_current = 0.0f;
 float vel_alpha   = 0.85f;
-float position_current = 0.0f;
-float position_target  = 0.0f;
-float position_error   = 0.0f;
 
-// ── POSITION HOLD (opt-in while inner pitch PID is being validated) ─────────
-// The old implementation integrated velocity into an unnamed trim. That was
-// mathematically a position term, but it hid the reference point and wound up
-// quickly when the robot was held or the wheels were off the floor.
-// ── OUTER LOOP: POSITION PD -> LEAN ANGLE ───────────────────────────────────
-// This loop's output is an ANGLE, not PWM. Explicit position error pulls the
-// robot home; encoder velocity damps the return and reacts to a push.
+// ── AUTO-TRIM (opt-in drift-cancelling bias) ─────────────────────────────────
+// Ports the RC_mcu_IK_wireless velocity-integral idea (same sign convention
+// and same order-of-magnitude gain as its Ki_vel) into this single-loop
+// firmware: while enabled, any steady encL/encR drift means targetAngle is
+// off from the true balance point, so integrate vel_current toward zero and
+// add the result on top of targetAngle. "TC" then bakes the converged bias
+// into targetAngle permanently, replacing a manual re-trim.
+// ── OUTER LOOP: VELOCITY -> LEAN ANGLE (the cascade) ────────────────────────
+// THE KEY IDEA: this loop's output is an ANGLE, not a PWM. A balancing robot
+// cannot be commanded to move directly -- leaning IS how it accelerates. So a
+// velocity error is converted into the lean the inner loop must then hold.
 //
 //   pushed FORWARD  ->  vel_current > 0  ->  (0 - vel) < 0  ->  lean_cmd < 0
 //                   ->  robot leans BACKWARD  ->  gravity decelerates it
 //
-// There is intentionally no outer integral. The inner pitch PID already has
-// integral action; adding another integrator makes recovery slow and jerky.
-bool  autoTrimEnabled = false;          // protocol name retained; GUI calls it Position Hold
-                                         // TE0 disables it for inner-loop tuning
-float Kp_pos = 0.0008f;                 // deg / encoder count — PP command
-float Kp_vel = 0.0015f;                 // deg / (encoder count/s) — VP command
-float lean_cmd = 0.0f;                  // slew-limited outer-loop output (degrees)
-// Clamp and slew limit are both in degrees so the outer loop cannot suddenly
-// kick the already-tuned inner balance controller.
-const float MAX_LEAN_CMD      = 3.0f;
-const float MAX_LEAN_SLEW_DPS = 3.0f;
+// Verified in simulation: with this sign a 0.35 m/s push recovers with ~7 cm
+// of drift; with the sign flipped the robot falls in 1.29 s.
+//
+// Why a cascade at all: the torque->position transfer function has a
+// RIGHT-HALF-PLANE zero at ~7.1 rad/s (to move forward the wheels must first
+// go backward). That caps any velocity loop at ~0.56 Hz, while the unstable
+// pole at 11 rad/s forces the balance loop to run 10x faster. One flat PID
+// has a single bandwidth and physically cannot serve both.
+bool  autoTrimEnabled = true;           // velocity loop ON by default in this variant
+                                         // (TE0 disables it -> reverts to pure single-loop
+                                         //  PID, so the two can be A/B compared on the bench)
+float Kp_vel  = 0.0030f;                // deg of lean per (count/s) of error  — VP cmd
+float Ki_trim = 0.0015f;                // deg of lean per (count/s) per second — TG cmd
+float trim_bias = 0.0f;                 // integral part of the lean command (deg)
+float lean_cmd  = 0.0f;                 // TOTAL commanded lean = P + I (deg), telemetry
+// Clamped in DEGREES because that is what this loop outputs. 6 deg is a real
+// lean the robot can hold; the old 15 deg was 60% of the 25 deg safety cutoff,
+// so a wound-up bias could trip the cutoff on its own.
+const float MAX_TRIM_BIAS = 6.0f;
 
 bool motorsEnabled = false;
 bool safetyLatched = false;
@@ -747,10 +712,7 @@ void pollLegServosTask() {
 
 // ── IMU ───────────────────────────────────────────────────────────────────────
 void setupMPU() {
-  Wire.setSCL(PB6);
-  Wire.setSDA(PB7);
   Wire.begin();
-  Wire.setClock(400000);
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x6B);
   Wire.write(0);
@@ -830,7 +792,7 @@ void setMotors(int leftPWM, int rightPWM) {
 
 // ── COMMAND PARSER — single-loop balance + calibration only ──────────────────
 void parseCommand(char *cmd) {
-  char ack[192];
+  char ack[160];
 
   // PING:<token> → PONG:<token>  (keeps latency_test.py working)
   if (cmd[0]=='P' && cmd[1]=='I' && cmd[2]=='N' && cmd[3]=='G') {
@@ -984,45 +946,28 @@ void parseCommand(char *cmd) {
       (unsigned)(ikValid[0]?1:0),(unsigned)(ikValid[1]?1:0),(int)moveActive);
     if (n > 0 && n < (int)sizeof(sl) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)sl, n);
-
-    n = snprintf(ack, sizeof(ack),
-      "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f PosP:%.5f VelD:%.5f Crouch:%.2f\n",
-      Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Kp_pos, Kp_vel, crouchOffset);
-    if (n > 0 && n < (int)sizeof(ack) && Serial3.availableForWrite() >= n)
-      Serial3.write((uint8_t*)ack, n);
     return;
   }
 
-  // Position-hold controls — multi-char, checked before the single-letter
+  // Auto-trim controls — multi-char, must be checked before the single-letter
   // 'T' (max safe tilt) case below or "TE1"/"TG.05" would parse as garbage tilt.
   else if (cmd[0]=='T' && cmd[1]=='E') {
     autoTrimEnabled = (cmd[2] == '1');
-    position_target = position_current;       // enabling never drives toward an old point
-    position_error  = 0.0f;
-    lean_cmd        = 0.0f;
+    if (!autoTrimEnabled) trim_bias = 0.0f;   // don't leave a half-converged bias live
     snprintf(ack, sizeof(ack), "ACK:AUTOTRIM_%s", autoTrimEnabled ? "ON" : "OFF");
     Serial3.println(ack);
     return;
   }
   else if (cmd[0]=='T' && cmd[1]=='C') {
-    // Backward-compatible alias for the old GUI's Commit Trim button.
-    position_target = position_current;
-    position_error  = 0.0f;
-    lean_cmd        = 0.0f;
-    snprintf(ack, sizeof(ack), "HOLD:ZERO POS:%.1f", position_target);
+    targetAngle += trim_bias;
+    float committed = trim_bias;
+    trim_bias = 0.0f;
+    integral  = 0.0f;                         // stale balance integral would double-kick
+    snprintf(ack, sizeof(ack), "TRIM:DONE COMMITTED:%.3f TARGET:%.3f", committed, targetAngle);
     Serial3.println(ack);
     return;
   }
-  else if (cmd[0]=='H' && cmd[1]=='Z') {
-    position_target = position_current;
-    position_error  = 0.0f;
-    lean_cmd        = 0.0f;
-    snprintf(ack, sizeof(ack), "HOLD:ZERO POS:%.1f", position_target);
-    Serial3.println(ack);
-    return;
-  }
-  else if (cmd[0]=='T' && cmd[1]=='G') Kp_pos = atof(cmd + 2); // legacy alias
-  else if (cmd[0]=='P' && cmd[1]=='P') Kp_pos = atof(cmd + 2);
+  else if (cmd[0]=='T' && cmd[1]=='G') Ki_trim = atof(cmd + 2);
   // VP<f> — outer-loop proportional gain, deg of lean per (count/s).
   // Checked before any single-char 'V' case would be (there are none), and
   // before 'T'/'C' so it can never be mistaken for tilt or calibrate.
@@ -1082,7 +1027,7 @@ void parseCommand(char *cmd) {
   else if (cmd[0] == 'C') { startCalibration(); return; }
   else if (cmd[0] == 'R') {
     integral  = 0.0f;
-    lean_cmd  = 0.0f;
+    trim_bias = 0.0f;
     Serial3.println("ACK:INT_RESET");
     return;
   }
@@ -1091,11 +1036,8 @@ void parseCommand(char *cmd) {
     if (motorsEnabled) {
       safetyLatched = false;
       integral      = 0.0f;
-      lean_cmd      = 0.0f;
+      trim_bias     = 0.0f;
       vel_current   = 0.0f;
-      position_current = 0.0f;
-      position_target  = 0.0f;
-      position_error   = 0.0f;
       encoderLeft = 0; encoderRight = 0;
       prevEncoderLeft = 0; prevEncoderRight = 0;
     }
@@ -1107,8 +1049,8 @@ void parseCommand(char *cmd) {
 
   // Ack for tuning commands — parsed by _parse_fw_update() in the GUI.
   snprintf(ack, sizeof(ack),
-    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f PosP:%.5f VelD:%.5f Crouch:%.2f",
-    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Kp_pos, Kp_vel, crouchOffset);
+    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f Crouch:%.2f VP:%.4f",
+    Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffset, Kp_vel);
   uint8_t len = (uint8_t)strlen(ack);
   ack[len] = '\n'; len++;
   if (Serial3.availableForWrite() >= len)
@@ -1142,10 +1084,10 @@ void handleTelemetryRX() {
 
 // ── SETUP ─────────────────────────────────────────────────────────────────────
 void setup() {
-  analogWriteResolution(8);
   delay(2000);                 // let AX-12 servos stabilise before UART traffic
 
-  Serial3.begin(115200);       // mirror: 3DR USART3 (PB10/PB11) + FTDI USART1
+  Serial1.begin(115200);       // tick profiler out (PA9 = TX)
+  Serial3.begin(115200);       // 3DR radio
   Serial2.begin(1000000);      // AX-12 bus
 
   initAX12Legs();
@@ -1170,6 +1112,8 @@ void setup() {
   Serial3.println("BOOT:OK");
 
   profResetWindow();
+  Serial1.println();
+  Serial1.println("# profiler: P period B body F free X overhead");
 }
 
 // ── MAIN LOOP (100 Hz) ────────────────────────────────────────────────────────
@@ -1206,8 +1150,6 @@ void loop() {
   float deltaR = -(float)(encR - prevEncoderRight);   // mirror-mount normalise
   float vel_raw = ((deltaL + deltaR) * 0.5f) / dt;
   vel_current = vel_alpha * vel_current + (1.0f - vel_alpha) * vel_raw;
-  position_current = ((float)encL - (float)encR) * 0.5f;
-  position_error   = position_target - position_current;
   prevEncoderLeft  = encL;
   prevEncoderRight = encR;
   prof_stage[3] = (uint16_t)(micros() - prof_m); prof_m = micros();   // E
@@ -1226,26 +1168,26 @@ void loop() {
   float output = 0.0f;
   if (!motorsEnabled || calibrating) {
     integral  = 0.0f;
+    trim_bias = 0.0f;
     lean_cmd  = 0.0f;
     setMotors(0, 0);
   } else {
-    // ── OUTER LOOP: position P + velocity damping -> requested lean ─────────
-    // This is a PD position controller because velocity is the derivative of
-    // position. Its output is intentionally small and slew-limited before it
-    // becomes the setpoint of the fast inner pitch PID.
+    // ── OUTER LOOP (slow, ~0.5 Hz): velocity error -> lean angle ───────────
+    // Target velocity is always 0 in this variant (no drive command), so any
+    // steady vel_current is unwanted motion. The P term reacts to a push
+    // immediately; the I term learns the standing CoM/mounting offset that
+    // used to need a hand re-trim. Both output DEGREES OF LEAN.
     if (autoTrimEnabled) {
-      float desired_lean =
-        (Kp_pos * position_error) + (Kp_vel * (0.0f - vel_current));
-      desired_lean = constrain(desired_lean, -MAX_LEAN_CMD, MAX_LEAN_CMD);
-
-      float max_step = MAX_LEAN_SLEW_DPS * dt;
-      float lean_step = constrain(desired_lean - lean_cmd, -max_step, max_step);
-      lean_cmd += lean_step;
+      float vel_error = 0.0f - vel_current;            // counts/s, want zero
+      trim_bias += Ki_trim * vel_error * dt;
+      trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      lean_cmd   = (Kp_vel * vel_error) + trim_bias;
+      lean_cmd   = constrain(lean_cmd, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
     } else {
-      lean_cmd = 0.0f;                                  // pure inner-loop mode
+      lean_cmd = 0.0f;                                  // pure single-loop mode
     }
 
-    // ── INNER LOOP (fast, 100 Hz): hold the commanded lean ──────────────────
+    // ── INNER LOOP (fast, ~10 Hz): hold the commanded lean ─────────────────
     // Unchanged from the validated single-loop tune EXCEPT its setpoint, which
     // is now driven by the outer loop instead of being a fixed trim.
     float error = (targetAngle + lean_cmd) - pitch;
@@ -1316,12 +1258,12 @@ void loop() {
     // ── Balance telemetry (10 Hz) ────────────────────────────────────────────
     // Extended with leg subsystem state fields so the GUI can display both
     // the balance loop AND the AX-12 trajectory/mode in one pass.
-    char line[320];
+    char line[256];
     int n = snprintf(line, sizeof(line),
-      "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,POS:%.1f,PERR:%.1f,"
+      "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,"
       "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
       "TORQ:%d,CR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d\n",
-      pitch, output, integral, encL, encR, vel_current, position_current, position_error,
+      pitch, output, integral, encL, encR, vel_current,
       (int)motorsEnabled, maxSafeTilt, lean_cmd,
       (int)autoTrimEnabled, (int)safetyLatched,
       (int)g_torqueOn, crouchOffset,
@@ -1368,7 +1310,6 @@ void loop() {
   // profiler's own cost. That tax is reported separately as X (previous tick's,
   // since this tick's is not knowable until after the write). Subtract X to get
   // what the loop costs with profiling compiled out.
-#if ENABLE_TICK_PROFILER
   uint32_t prof_bodyU = micros() - prof_t0;
   uint16_t prof_body  = (prof_bodyU > 65535) ? 65535 : (uint16_t)prof_bodyU;
   profAccumulate(prof_body);
@@ -1382,7 +1323,7 @@ void loop() {
       if (profReportLine(pb, sizeof(pb))) {
         int n = (int)strlen(pb);
         pb[n++] = '\n';
-        if (Serial6.availableForWrite() >= n) { Serial6.write((uint8_t*)pb, n); prof_report++; }
+        if (Serial1.availableForWrite() >= n) { Serial1.write((uint8_t*)pb, n); prof_report++; }
       } else {
         prof_report = -1;
       }
@@ -1394,8 +1335,8 @@ void loop() {
       n += snprintf(pb + n, sizeof(pb) - n, " X%lu%s\n",
                     (unsigned long)prof_printUs,
                     (prof_body > 10000) ? " !OVR" : "");
-      if (n > 0 && n < (int)sizeof(pb) && Serial6.availableForWrite() >= n)
-        Serial6.write((uint8_t*)pb, n);
+      if (n > 0 && n < (int)sizeof(pb) && Serial1.availableForWrite() >= n)
+        Serial1.write((uint8_t*)pb, n);
       else if (prof_drop < 0xFFFF) prof_drop++;
     }
 
@@ -1408,5 +1349,4 @@ void loop() {
     }
   }
   prof_printUs = micros() - prof_tp;
-#endif
 }
