@@ -86,7 +86,11 @@ class SerialLink:
             "drive":     0.0,    # -1..+1 decoded drive stick
             "steer":     0.0,    # -1..+1 decoded steer stick
             "target_vel": 0.0,   # counts/sec commanded to the outer loop
-            "channels":  [0] * 8,   # raw microseconds, Ch1..Ch8
+            "target_ang": 0.0,   # targetAngle in deg (shared with the GUI bar)
+            "ch8_raw":    0,     # raw Ch8 width, to spot a resting offset
+            "channels":  [0] * 10,  # raw microseconds, Ch1..Ch10
+            "max_crouch_rate": 3.0,
+            "idle_states": {},   # RCCEN IDLE8/IDLE10, boot-resting switch positions
             "max_vel":    400.0,
             "max_steer":  40.0,
             "max_crouch": 40.0,
@@ -313,6 +317,29 @@ class SerialLink:
             self._parse_ax12_state(clean_line)
         elif clean_line.startswith("SRV:"):
             self._parse_servo_health(clean_line)
+        elif clean_line.startswith("RCCEN:"):
+            # One-shot boot capture report:
+            #   RCCEN:<Ch3 centre>,<Ch4 centre>,IDLE8:<-1|0|1>,IDLE10:<-1|0|1>
+            # Ch3/Ch4 are proportional sticks, so a resting WIDTH is captured.
+            # Ch8/Ch10 are switches on this transmitter, so what is captured is
+            # which position they were resting in -- that position becomes idle.
+            try:
+                payload = clean_line.split(":", 1)[1]
+                parts = payload.split(",")
+                vals, idle = [], {}
+                for part in parts:
+                    if part.startswith("IDLE"):
+                        k, v = part.split(":", 1)
+                        idle[k] = int(float(v))
+                    elif len(vals) < 2:
+                        vals.append(int(float(part)))
+                with self._lock:
+                    if vals:
+                        self.rc["centres"] = vals
+                    if idle:
+                        self.rc["idle_states"] = idle
+            except (ValueError, IndexError):
+                pass
         elif clean_line.startswith("RC:"):
             self._parse_rc_channels(clean_line)
         elif clean_line.startswith("Updated ->"):
@@ -412,6 +439,15 @@ class SerialLink:
                 self.rc["steer"]      = data["RCS"]
             if "TVEL" in data:
                 self.rc["target_vel"] = data["TVEL"]
+            if "RCT"  in data:
+                # targetAngle. Mirrored into fw so the GUI "Target" slider
+                # follows it -- this field exists because targetAngle was
+                # previously invisible in telemetry, which let Ch8 silently
+                # slew it to the clamp with nothing on screen to show it.
+                self.rc["target_ang"]  = data["RCT"]
+                self.fw["targetAngle"] = data["RCT"]
+            if "RC8"  in data:
+                self.rc["ch8_raw"]     = int(data["RC8"])
 
             if len(self.history["t"]) > 500:
                 for k in self.history:
@@ -466,9 +502,10 @@ class SerialLink:
                 self.ax12["move_active"]   = bool(int(data["MOVE"]))
 
     def _parse_rc_channels(self, line):
-        """Parses: RC:1500,1500,1000,1000,2000,1000,1000,1000,LINK:1
+        """Parses: RC:1500,1500,1000,1000,2000,1000,1000,1000,1000,1500,LINK:1
 
-        Eight raw channel widths in microseconds (Ch1..Ch8) then the link flag.
+        TEN raw channel widths in microseconds (Ch1..Ch10) then the link flag.
+        Ch9/Ch10 were added when RC crouch became reachable in this variant.
         A channel the receiver has never populated reads 0 — kept as 0 rather
         than coerced to a midpoint, because "no data" and "centred stick" must
         stay distinguishable in the UI. This line exists specifically so the
@@ -478,12 +515,14 @@ class SerialLink:
             _, payload = line.split(":", 1)
             parts = payload.split(",")
             chans = []
-            for i in range(8):
+            for i in range(10):
                 try:
                     chans.append(int(float(parts[i])))
                 except (IndexError, ValueError):
                     chans.append(0)
             link = None
+            # Scanned by prefix rather than by index so an older firmware that
+            # still emits only eight channels keeps parsing.
             for part in parts[8:]:
                 if part.startswith("LINK:"):
                     try:

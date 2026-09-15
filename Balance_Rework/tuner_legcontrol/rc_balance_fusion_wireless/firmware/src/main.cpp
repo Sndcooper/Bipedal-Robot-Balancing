@@ -78,19 +78,28 @@ extern HardwareSerial Serial3;   // 3DR radio
 // transmitter; verify yours with the RC:* telemetry line before trusting it —
 // readChannel() is 0-indexed, so Ch<n> is readChannel(n-1).
 //
-//   Ch1 (idx0) steer      : differential PWM trim, applied AFTER the balance PID
-//   Ch2 (idx1) drive      : velocity target for the outer (velocity->lean) loop
-//   Ch5 (idx4) ARM switch : 2-pos. HIGH = motors armed. Also the disarm path.
-//   Ch6 (idx5) crouch     : knob/pot -> crouch depth in mm, both legs
-//   Ch7 (idx6) calibrate  : momentary. Rising edge starts an IMU calibration.
-//   Ch8 (idx7) integral   : 2-pos. HIGH = kill the balance integrator (debug).
+//   Ch3  (idx2) DRIVE     : self-centring pot, fwd/back -> velocity target for
+//                           the outer (velocity->lean) loop. Idle -> 0.
+//   Ch4  (idx3) STEER     : self-centring pot -> differential PWM trim applied
+//                           AFTER the balance PID. Idle -> 0.
+//   Ch5  (idx4) CALIBRATE : momentary button, rising edge starts an IMU cal.
+//   Ch6  (idx5) TARGET=0  : momentary button, rising edge zeroes the target.
+//   Ch7  (idx6) MOTORS    : 2-position switch. HIGH = armed, LOW = disarmed.
+//   Ch8  (idx7) TARGET +- : SWITCH (two-state on this TX). Held = targetAngle
+//                           slews at RC_TARGET_RATE deg/sec; released = hold.
 //
-// A note on why these channels and not the flagship's: RC_mcu_IK_wireless uses
-// Ch3/Ch4/Ch5/Ch7/Ch8/Ch10. That mapping is NOT copied here, because this
-// firmware has different controls to expose (crouch instead of gimbal offset)
-// and because Ch3 on a mode-2 TX is the self-centring-free throttle stick —
-// wrong ergonomics for a drive axis that must return to neutral. Set your TX to
-// match THIS table; do not assume a model memory from the other variant works.
+//   Ch9  (idx8) LEG SEL   : 3-position switch. LOW = both legs, MID = left
+//                           only, HIGH = right only. Gates Ch10.
+//   Ch10 (idx9) CROUCH +- : SWITCH (two-state on this TX). Held = the leg(s)
+//                           Ch9 selected move at RC_CROUCH_RATE mm/sec.
+//
+// Ch8 and Ch10 are DISCRETE: their resting position is captured at boot and
+// defined as idle, so leave every switch where you want it before powering up.
+//
+// Ch1/Ch2 are unused so a mode-2 TX's right-hand stick is left alone.
+//
+// This map now matches bfrc and mcu_balance_fusion_wireless. It previously read
+// Ch1/Ch2/Ch5, which a logged session proved the transmitter never drives.
 // ============================================================================
 IBusBM ibus;
 
@@ -141,6 +150,42 @@ IBusBM ibus;
 // robot does not get far.
 #define RC_TIMEOUT_MS 500
 
+// ── PER-CHANNEL CENTRE, AUTO-CAPTURED ──────────────────────────────────────
+// A hard-coded 1500 centre is wrong on real hardware. Logged evidence: Ch8 of
+// this transmitter rests at 1608-1616 us. That is 109 us off 1500 -- OUTSIDE
+// the 75 us deadband -- so the Ch8 rate control saw a permanent +0.08 axis and
+// integrated targetAngle at 0.53 deg/sec, with nobody touching the pot, until
+// it pinned at the clamp 38 s later. The robot then balanced to that lean and
+// drove away underneath itself.
+//
+// So each analog channel's resting value is captured as ITS OWN centre, once,
+// from the first frames after the link comes up. Leave the sticks alone at
+// power-up (standard RC practice) and every axis then reads exactly 0 at rest.
+//
+// Guarded two ways: a captured centre is only accepted if it is within +-250 us
+// of nominal (a stick held hard over at boot is rejected, and 1500 is kept),
+// and the capture happens once per boot so it can never chase a moving stick.
+uint16_t rcCen[10] = {RC_CENTRE, RC_CENTRE, RC_CENTRE, RC_CENTRE, RC_CENTRE,
+                      RC_CENTRE, RC_CENTRE, RC_CENTRE, RC_CENTRE, RC_CENTRE};
+// Boot-resting position of each DISCRETE channel (-1 / 0 / +1), captured
+// alongside the centres. Needed because a two-state switch has no neutral: at
+// rest it sits hard at one endpoint, which a plain threshold reads as permanent
+// full deflection. Whatever position the switch is in at power-up is therefore
+// defined as idle, and only the OTHER position commands motion.
+int8_t   rcIdle[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+bool     rcCenCaptured = false;
+uint8_t  rcCenSamples  = 0;
+#define RC_CEN_SAMPLES   20     // ~20 frames, about 150 ms of iBUS
+#define RC_CEN_TOLERANCE 250    // reject an implausible "centre"
+// How far from nominal centre a discrete channel must sit to count as thrown.
+// 250 us puts the boundary a quarter of the way across the 1000..2000 travel,
+// so a switch that does not hit its endpoints exactly still resolves.
+#define RC_SWITCH_MARGIN 250
+// Consecutive polls a new discrete state must hold before it is acted on.
+// 3 polls at the 10 ms tick is ~30 ms -- far longer than the single-frame
+// glitches seen in the logs, far shorter than any real switch throw.
+#define RC_SWITCH_DEBOUNCE 3
+
 bool  rcEnabled   = true;    // RC0/RC1 command — lets the GUI take sole control
 bool  rcLinkOK    = false;   // frames arriving?
 unsigned long rcLastFrameMs = 0;
@@ -151,18 +196,72 @@ float rc_drive     = 0.0f;   // -1..+1, forward positive
 float rc_steer     = 0.0f;   // -1..+1, right positive
 bool  rc_arm       = false;  // Ch5 armed?
 bool  rcPrevArm    = false;  // edge detect on Ch5
-bool  rcPrevCal    = false;  // edge detect on Ch7
+bool  rcPrevCal    = false;  // edge detect on Ch5 (calibrate)
+bool  rcPrevZero   = false;  // edge detect on Ch6 (target = 0)
+float rc_targetAxis = 0.0f;  // Ch8, -1..+1, raw axis before rate integration
+float rc_crouchAxis = 0.0f;  // Ch10, -1..+1, raw axis before rate integration
+uint8_t rc_legSel   = 0;     // Ch9: 0 = both legs, 1 = left only, 2 = right only
 bool  rcHaveSeenArmLow = false;  // see readRC(): boot-time arm interlock
 
 // Raw values, forwarded to the GUI so the operator can verify the channel map
 // and see the failsafe state without a transmitter-side display.
-uint16_t rc_raw[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+// TEN channels, not eight. Ch9 (leg select) and Ch10 (crouch rate) were
+// simply never read before, which is the entire reason RC crouch did nothing:
+// the pot moved, the receiver sent it, and the firmware never looked.
+uint16_t rc_raw[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 // How far the sticks are allowed to command. Both are deliberately modest —
 // this is a tall inverted pendulum on two wheels, not a car.
-float RC_MAX_VEL   = 400.0f;  // counts/sec at full drive stick   — RV cmd
-float RC_MAX_STEER = 40.0f;   // PWM counts at full steer stick    — RS cmd
-float RC_MAX_CROUCH = 40.0f;  // mm of crouch at full Ch6 knob     — RC cmd
+// 800, doubled from 400. The logged runs sat at RCD:1.00 / TVEL:400.0 with the
+// stick hard over, i.e. the operator was asking for everything the limit had.
+// Kp_vel 0.015 x 800 = 12 deg of commanded lean at full stick, which is exactly
+// MAX_LEAN_CMD -- so full stick now reaches the lean clamp and not past it.
+float RC_MAX_VEL   = 800.0f;  // counts/sec at full drive stick   — RV cmd
+// 80, doubled from 40: at 40 counts of differential PWM the machine turned
+// so slowly it read as "not turning". 80 is still under a third of the 255
+// full-scale, so steering alone cannot saturate a motor and starve the balance
+// PID -- the property the original 40 was chosen to guarantee.
+float RC_MAX_STEER = 80.0f;   // PWM counts at full steer stick    — RS cmd
+float RC_MAX_CROUCH = 40.0f;  // mm of crouch, GUI CR + RC Ch10    — RCM cmd
+// 7.5 mm/sec (2.5x the first pass), in the same millimetres the GUI's crouch bar
+// uses, so the RC switch and the slider speak one unit. Ch10 is a switch, so this
+// is a single held rate rather than a band: full RC_MAX_CROUCH travel in ~5.3 s.
+float RC_CROUCH_RATE = 7.5f;  // mm/sec while Ch10 is held         — RCR cmd
+
+// ── STEERING RESPONSE CURVE ───────────────────────────────────────────────
+// "Proportional" steering without a second control loop. A linear stick->PWM
+// map spends most of its useful range in the first few degrees of stick, which
+// is why 80 counts feels like an on/off turn. Blending in a CUBIC term keeps
+// full authority at the stops but flattens the response around centre, so small
+// stick movements give small, gradual corrections:
+//
+//   steer = RC_MAX_STEER * ( k*a^3 + (1-k)*a )      a = -1..+1
+//
+// k = 0 is the old linear map, k = 1 is pure cubic. 0.6 gives roughly a third of
+// the old sensitivity at quarter stick while still reaching 80 counts at full.
+// This is a static shaping of the COMMAND, not feedback: nothing to tune against
+// the plant, no integrator, no extra state, and no interaction with the balance
+// PID, which owns the common-mode output while steering owns the differential.
+float RC_STEER_EXPO = 0.6f;   // 0 = linear, 1 = fully cubic       — RSE cmd
+
+// ── Ch8 TARGET-RATE control — IN DEGREES ───────────────────────────────────
+// Ch8 slews targetAngle, the same variable the GUI's "Target" slider sets with
+// S<f>. That slider's range is -20..+20 DEGREES, so this band is deg/sec and
+// the clamp is degrees:
+// ONE rate, not a band. Ch8 on this transmitter is a two-state switch: it reads
+// one endpoint or the other and nothing in between, so a squared taper between
+// a minimum and a maximum rate has no travel to interpolate over and would only
+// ever produce the maximum. Held = 0.05 deg/sec, released = stop.
+//
+// 0.05 deg/sec is a trim, deliberately: it takes ~2.7 minutes to cross the whole
+// +-8 deg clamp, so the switch cannot walk the setpoint anywhere dangerous while
+// the operator's attention is on the robot.
+float RC_TARGET_RATE = 0.05f;   // deg/sec while Ch8 is held   — RTR cmd
+// 8, not 20. The logged run pinned targetAngle at the old +20 clamp and the
+// robot tried to hold a 20 deg lean against a 25 deg safety cutoff -- 5 deg of
+// margin for every disturbance, and the session duly ended in SAFETY:CUTOFF.
+// 8 deg is a real, usable trim range that still leaves 17 deg of headroom.
+float RC_TARGET_LIMIT    =  8.0f;   // clamp on targetAngle, deg   — RTL cmd
 
 // ── MPU6050 ───────────────────────────────────────────────────────────────────
 const int MPU_ADDR = 0x68;
@@ -230,6 +329,19 @@ float target_velocity = 0.0f;           // counts/sec, forward positive
 // lean the robot can hold; the old 15 deg was 60% of the 25 deg safety cutoff,
 // so a wound-up bias could trip the cutoff on its own.
 const float MAX_TRIM_BIAS = 6.0f;
+
+// TOTAL commanded lean (Kp_vel term + learned trim). Doubled from the 6 deg the
+// trim integrator uses, because 6 deg was the whole reason a drive command
+// barely leaned the robot: with RV400 the proportional term alone asked for
+// ~4.6 deg, so the clamp truncated nearly every real drive command and the
+// machine crept instead of accelerating.
+//
+// Kept as its OWN constant rather than raising MAX_TRIM_BIAS: the trim
+// integrator must stay at 6, since it is the term that can wind up unattended.
+// 12 deg of lean plus the +-8 deg target clamp sits at 20 deg against the 25 deg
+// safety cutoff -- deliberately tight, so do not raise this without also
+// raising maxSafeTilt.
+const float MAX_LEAN_CMD  = 12.0f;
 
 bool motorsEnabled = false;
 bool safetyLatched = false;
@@ -329,7 +441,11 @@ void markAllSettingsDirty() { settingsDirtyMask = 0x0F; }
 #define MODE_IK     1
 uint8_t  poseMode   = MODE_CROUCH;
 
-uint16_t moveTimeMs = 800;              // MT<n>, 100-3000 ms per move
+// 240 ms, 0.3x the old 800. 800 ms made every GUI-driven pose change a slow
+// glide; it also meant a re-issued move (which restarts the interpolation)
+// delivered only a sliver of each step. RC crouch bypasses this path entirely
+// now, so this figure only shapes CR/CRL/CRR/FT/mode-change moves.
+uint16_t moveTimeMs = 240;              // MT<n>, 100-3000 ms per move
 bool     moveActive = false;
 unsigned long moveStartMs = 0;
 float mv_x0[2], mv_y0[2];               // where the move started
@@ -962,6 +1078,18 @@ void parseCommand(char *cmd) {
   else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='M') {
     RC_MAX_CROUCH = constrain(atof(cmd + 3), 0.0f, 80.0f);
   }
+  else if (cmd[0]=='R' && cmd[1]=='C' && cmd[2]=='R') {
+    // mm/sec of crouch travel while Ch10 is held.
+    RC_CROUCH_RATE = constrain(atof(cmd + 3), 0.1f, 200.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='S' && cmd[2]=='E') {
+    // Steering expo blend, 0 = linear .. 1 = fully cubic.
+    RC_STEER_EXPO = constrain(atof(cmd + 3), 0.0f, 1.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='T' && cmd[2]=='R') {
+    // deg/sec of target-angle travel while Ch8 is held.
+    RC_TARGET_RATE = constrain(atof(cmd + 3), 0.001f, 5.0f);
+  }
 
   // Auto-trim controls — multi-char, must be checked before the single-letter
   // 'T' (max safe tilt) case below or "TE1"/"TG.05" would parse as garbage tilt.
@@ -1125,9 +1253,11 @@ void handleTelemetryRX() {
 // Returns exactly 0.0 inside the deadband and at the endpoints of a dead
 // channel, so a disconnected or unbound channel is indistinguishable from a
 // centred stick — the safe failure, not a stuck full-deflection command.
-static float rcAxis(uint16_t raw) {
+// `ch` selects that channel's captured centre. Passing the centre in (rather
+// than assuming 1500) is the whole fix for the Ch8 drift described above.
+static float rcAxis(uint16_t raw, uint8_t ch) {
   if (raw < RC_MIN - 200 || raw > RC_MAX + 200) return 0.0f;  // 0 or nonsense
-  int delta = (int)raw - RC_CENTRE;
+  int delta = (int)raw - (int)rcCen[ch];
   float span = (float)(RC_MAX - RC_CENTRE - RC_DEADBAND);     // 425 us of live travel
   float axis;
   if (delta > RC_DEADBAND) {
@@ -1147,6 +1277,62 @@ static float rcAxis(uint16_t raw) {
   // stop would command 141% of RC_MAX_VEL and 141% of RC_MAX_STEER — silently
   // defeating both limits the operator set. Clamp AFTER the rescale.
   return constrain(axis, -1.0f, 1.0f);
+}
+
+// Discrete read for a channel that is a SWITCH rather than a proportional pot:
+// returns -1, 0 or +1 and nothing between. Used for Ch8 and Ch10, which on this
+// transmitter only ever emit an endpoint.
+//
+// The idle test is what makes a TWO-state switch safe here. A two-position
+// switch has no neutral -- at rest it sits hard at 1000 or 2000 -- so a plain
+// threshold would read it as permanent full deflection and the rate would
+// integrate forever with nobody touching anything. Comparing against the
+// position captured at boot means the resting position commands nothing, and
+// only moving the switch does. On a THREE-position switch left centred at boot
+// rcIdle is 0 and both directions work normally.
+//
+// DEBOUNCED, and not as a precaution: the logged sessions show these channels
+// glitching. With nothing touching the pot, Ch8 rests at ~1611-1625 and then
+// emits isolated single frames of 1023, 1000, 1512, 1077, 1119, 1129, 1583,
+// 1590; Ch10 does the same (1686, 1775, 1982, 1096, 1481). Undebounced, each of
+// those one-frame excursions clears the threshold and reads as a deliberate
+// switch throw -- stepping targetAngle or the crouch accumulator on pure noise,
+// with nobody touching the transmitter. A genuine throw lasts hundreds of
+// milliseconds, so requiring the new state to survive 3 consecutive polls
+// (~30 ms) rejects every glitch in those logs and costs no perceptible lag.
+static int rcTriState(uint16_t raw, uint8_t ch) {
+  static int8_t  stable[10] = {0,0,0,0,0,0,0,0,0,0};
+  static int8_t  pending[10] = {0,0,0,0,0,0,0,0,0,0};
+  static uint8_t pendCount[10] = {0,0,0,0,0,0,0,0,0,0};
+
+  if (raw < RC_MIN - 200 || raw > RC_MAX + 200) return 0;   // 0 or nonsense
+  int s;
+  if      ((int)raw < RC_CENTRE - RC_SWITCH_MARGIN) s = -1;
+  else if ((int)raw > RC_CENTRE + RC_SWITCH_MARGIN) s = +1;
+  else                                              s =  0;
+
+  if (s == stable[ch]) {
+    pendCount[ch] = 0;                     // no change in progress
+  } else if (s == pending[ch]) {
+    if (++pendCount[ch] >= RC_SWITCH_DEBOUNCE) {
+      stable[ch]    = (int8_t)s;           // held long enough: accept it
+      pendCount[ch] = 0;
+    }
+  } else {
+    pending[ch]   = (int8_t)s;             // a different candidate: restart
+    pendCount[ch] = 1;
+  }
+
+  return (stable[ch] == rcIdle[ch]) ? 0 : stable[ch];
+}
+
+// Unipolar 0..1 read, for a channel whose pot travels one way only (Ch9's
+// 3-position switch). Deliberately NOT centre-relative: a switch legitimately
+// rests at an endpoint, so rcAxis()'s deadband-about-centre is meaningless here.
+static float rcUnipolar(uint16_t raw) {
+  if (raw == 0) return 0.0f;
+  return constrain(((float)raw - (float)RC_MIN) / (float)(RC_MAX - RC_MIN),
+                   0.0f, 1.0f);
 }
 
 void readRC() {
@@ -1192,7 +1378,7 @@ void readRC() {
     rcLinkOK = false;
   }
 
-  for (uint8_t i = 0; i < 8; i++) rc_raw[i] = ibus.readChannel(i);
+  for (uint8_t i = 0; i < 10; i++) rc_raw[i] = ibus.readChannel(i);
 
   // ── FAILSAFE ─────────────────────────────────────────────────────────────
   // No valid frames for RC_TIMEOUT_MS: zero every command and disarm. Done
@@ -1200,6 +1386,7 @@ void readRC() {
   if (!rcLinkOK) {
     rc_drive = 0.0f;
     rc_steer = 0.0f;
+    rc_crouchAxis = 0.0f;   // stop crouch travel; the legs hold where they are
     target_velocity = 0.0f;
     if (rc_arm) {                     // we were armed and just lost the link
       rc_arm = false;
@@ -1224,8 +1411,39 @@ void readRC() {
   // for it on a robot that is misbehaving does not know or care that the GUI
   // holds authority. So under RE0 the switch loses its ability to ARM (the GUI
   // is driving) but keeps its ability to STOP.
+  // ── ONE-SHOT CENTRE CAPTURE ──────────────────────────────────────────────
+  // Runs only while disarmed, so it can never redefine "centre" mid-flight.
+  if (!rcCenCaptured && !motorsEnabled) {
+    if (++rcCenSamples >= RC_CEN_SAMPLES) {
+      for (uint8_t i = 0; i < 10; i++) {
+        int v = (int)rc_raw[i];
+        // Only the self-centring axes are captured. Switches legitimately sit
+        // at an endpoint, and adopting that as their "centre" would break the
+        // HIGH/LOW test that arms the motors.
+        // Ch8/Ch10 are discrete here, so their RESTING POSITION is captured
+        // instead of a centre -- see rcTriState().
+        if ((i == 7 || i == 9) && v > 0) {
+          if      (v < RC_CENTRE - RC_SWITCH_MARGIN) rcIdle[i] = -1;
+          else if (v > RC_CENTRE + RC_SWITCH_MARGIN) rcIdle[i] = +1;
+          else                                       rcIdle[i] =  0;
+        }
+        bool isAxis = (i == 2 || i == 3);
+        if (isAxis && v > 0 &&
+            v > RC_CENTRE - RC_CEN_TOLERANCE && v < RC_CENTRE + RC_CEN_TOLERANCE) {
+          rcCen[i] = (uint16_t)v;
+        }
+      }
+      rcCenCaptured = true;
+      char cb[80];
+      int n = snprintf(cb, sizeof(cb), "RCCEN:%u,%u,IDLE8:%d,IDLE10:%d\n",
+                       (unsigned)rcCen[2], (unsigned)rcCen[3],
+                       (int)rcIdle[7], (int)rcIdle[9]);
+      if (n > 0) Serial3.write((uint8_t*)cb, n);
+    }
+  }
+
   if (!rcEnabled) {
-    bool armSwitchOff = (rc_raw[4] > 0) && (rc_raw[4] <= RC_SWITCH_ON);
+    bool armSwitchOff = (rc_raw[6] > 0) && (rc_raw[6] <= RC_SWITCH_ON);
     if (armSwitchOff && motorsEnabled) {
       rc_arm        = false;
       rcPrevArm     = false;
@@ -1238,8 +1456,14 @@ void readRC() {
   }
 
   // ── Ch1 / Ch2: steer and drive ───────────────────────────────────────────
-  rc_steer = rcAxis(rc_raw[0]);
-  rc_drive = rcAxis(rc_raw[1]);
+  // Ch3 = drive (fwd/back), Ch4 = steer (left/right).
+  // REMAPPED from Ch1/Ch2. A logged session proved Ch1/Ch2 sat at 1500 for all
+  // 869 telemetry lines while Ch3/Ch4 swept their full range: the transmitter
+  // drives Ch3/Ch4, so reading Ch1/Ch2 made both axes permanently 0.00 and the
+  // drive/steer commands were silently dead. This now matches bfrc and
+  // mcu_balance_fusion_wireless.
+  rc_drive = rcAxis(rc_raw[2], 2);   // Ch3
+  rc_steer = rcAxis(rc_raw[3], 3);   // Ch4
   // Drive stick -> velocity setpoint for the outer loop. Only while armed;
   // a stick pushed before arming must not bank a setpoint that takes effect
   // the instant the motors come on.
@@ -1250,8 +1474,11 @@ void readRC() {
   // since a link loss) before it can arm. Otherwise powering the robot up with
   // the switch already HIGH would arm the motors the moment the first frame
   // arrives, with nobody's hand on it.
-  bool armSwitch = (rc_raw[4] > 0) && (rc_raw[4] > RC_SWITCH_ON);
-  if (rc_raw[4] > 0 && !armSwitch) rcHaveSeenArmLow = true;
+  // Ch7 = ARM. REMAPPED from Ch5: the log showed Ch7 toggling 1000<->2000
+  // (the operator working the arm switch) while Ch5 stayed at 1000, so RCA
+  // read 0 on 866 of 869 lines and the motors could not be armed from the TX.
+  bool armSwitch = (rc_raw[6] > 0) && (rc_raw[6] > RC_SWITCH_ON);
+  if (rc_raw[6] > 0 && !armSwitch) rcHaveSeenArmLow = true;
 
   // Resync with a disarm that came from somewhere else — the GUI's 'M' command
   // or the tilt-cutoff latch. Without this, rc_arm would still be true while
@@ -1288,21 +1515,124 @@ void readRC() {
   // calling it on every poll from a jittering pot would continuously restart
   // the move and the legs would never arrive. 1 mm of hysteresis on a 40 mm
   // range is well outside pot noise.
+  // Ch6 = "target = 0" momentary button (REMAPPED; was a crouch position pot).
+  // "Stop here": clears the Ch8 trim and the state that would otherwise carry
+  // the old target forward -- velocity setpoint, the outer loop's learned trim,
+  // and the encoder origin. Safe to press while balancing.
+  //
+  // The old Ch6 crouch-pot behaviour is dropped because the operator's layout
+  // puts crouch on Ch9/Ch10 (leg-select + rate), and this variant only decodes
+  // 8 channels -- so crouch is not reachable here at all. Use bfrc or
+  // mcu_balance_fusion_wireless for RC crouch control.
   if (rc_raw[5] > 0) {
-    float knob = (float)((int)rc_raw[5] - RC_MIN) / (float)(RC_MAX - RC_MIN);
-    knob = constrain(knob, 0.0f, 1.0f);
-    float wantCrouch = knob * RC_MAX_CROUCH;
-    if (fabsf(wantCrouch - crouchOffsetL) > 1.0f) {
-      crouchOffsetL = crouchOffsetR = wantCrouch;
-      if (poseMode == MODE_CROUCH) startPoseMove();
+    bool zeroSwitch = (rc_raw[5] > RC_SWITCH_ON);
+    if (zeroSwitch && !rcPrevZero) {
+      targetAngle     = 0.0f;
+      target_velocity = 0.0f;
+      trim_bias       = 0.0f;
+      encoderLeft = 0; encoderRight = 0;
+      prevEncoderLeft = 0; prevEncoderRight = 0;
+      Serial3.println("RC:TARGET_ZEROED");
     }
+    rcPrevZero = zeroSwitch;
+  }
+
+  // Ch8 = targetAngle +/- as a RATE, in degrees. Centre holds, deflection slews
+  // the balance setpoint -- the same variable the GUI's "Target" slider sets via
+  // S<f>, so the two are one control with two inputs. Squared taper for fine
+  // control near centre.
+  //
+  // Integrated against real elapsed time so the slew rate does not depend on
+  // the tick rate. A stale gap falls back to the nominal step rather than
+  // applying one huge jump.
+  // integ_dt is shared by BOTH rate controls (Ch8 target, Ch10 crouch), so it is
+  // computed once here in readRC()'s scope rather than inside either block.
+  static unsigned long rcLastIntegMs = 0;
+  float integ_dt = (rcLastIntegMs == 0) ? (RC_POLL_INTERVAL_MS * 1.0e-3f)
+                                        : ((nowMs - rcLastIntegMs) * 1.0e-3f);
+  if (integ_dt > 0.5f) integ_dt = RC_POLL_INTERVAL_MS * 1.0e-3f;
+  rcLastIntegMs = nowMs;
+
+  int ch8 = rcTriState(rc_raw[7], 7);
+  rc_targetAxis = (float)ch8;                 // telemetry mirror, now -1/0/+1
+  if (ch8 != 0) {
+    targetAngle += (float)ch8 * RC_TARGET_RATE * integ_dt;
+    targetAngle  = constrain(targetAngle, -RC_TARGET_LIMIT, RC_TARGET_LIMIT);
+  }
+
+  // -- Ch9: LEG SELECTOR (3-position switch) -------------------------------
+  // Gates which leg(s) Ch10 moves. Boundaries at a quarter and three quarters
+  // of travel, so a switch that does not sit at exactly 1000/1500/2000 still
+  // resolves to the right position.
+  if (rc_raw[8] > 0) {
+    float u = rcUnipolar(rc_raw[8]);
+    rc_legSel = (u < 0.25f) ? 0 : ((u < 0.75f) ? 1 : 2);
+  }
+
+  // -- Ch10: CROUCH / STRETCH as a RATE, gated by Ch9 ----------------------
+  // Centre = hold. Off-centre moves the selected leg(s) at a rate: positive
+  // crouches, negative stretches back toward standing.
+  //
+  // A rate, not a pot->depth map, because startPoseMove() RESTARTS the
+  // interpolation every time it is called. Driving it directly from a jittering
+  // pot would restart the move on every poll and the legs would never arrive.
+  //
+  // ── WHY THIS DOES NOT GO THROUGH startPoseMove() ─────────────────────────
+  // It used to, and that is why crouch did nothing even after the accumulator
+  // was fixed. startPoseMove() RESTARTS an 800 ms smoothstep interpolation from
+  // the current foot position every time it is called. Re-issuing it as the
+  // accumulator creeps means every move is restarted a small fraction of the way
+  // in, and a smoothstep barely moves near f=0:
+  //
+  //   re-issue every 20 ms  -> f = 20/800  = 0.025 -> s = 0.0018
+  //   re-issue every 167 ms -> f = 167/800 = 0.21  -> s = 0.11
+  //
+  // i.e. between 0.2% and 11% of each commanded step is actually delivered, and
+  // the legs never converge. An interpolator exists to turn a STEP into smooth
+  // motion; a rate command is already smooth motion, so feeding one into the
+  // other is the bug. The RC path therefore writes the foot position directly
+  // and cancels any interpolation in flight.
+  //
+  // The servos still see a rate-limited stream, not a flood: cur_* is updated
+  // here at up to 100 Hz but ax12SyncWriteGoals() runs from the hold-pose path
+  // at 10 Hz, so at 3 mm/sec the legs receive 0.3 mm steps.
+  static float lastIssuedCrouchL = 0.0f;
+  static float lastIssuedCrouchR = 0.0f;
+
+  int ch10 = rcTriState(rc_raw[9], 9);
+  rc_crouchAxis = (float)ch10;                // telemetry mirror, now -1/0/+1
+  if (ch10 != 0) {
+    float step = (float)ch10 * RC_CROUCH_RATE * integ_dt;
+
+    if (rc_legSel == 0)      { crouchOffsetL += step; crouchOffsetR += step; }
+    else if (rc_legSel == 1) { crouchOffsetL += step; }
+    else                     { crouchOffsetR += step; }
+    // Clamped independently, so driving one leg to its limit does not eat the
+    // other's remaining travel.
+    crouchOffsetL = constrain(crouchOffsetL, 0.0f, RC_MAX_CROUCH);
+    crouchOffsetR = constrain(crouchOffsetR, 0.0f, RC_MAX_CROUCH);
+  }
+
+  // Push whenever the commanded pose has actually changed -- including the tick
+  // after the switch is released, so the last partial millimetre is not left
+  // stranded. 0.01 mm is far below the ~0.3 mm the AX-12's position resolution
+  // can express, so this cannot chatter.
+  if (poseMode == MODE_CROUCH &&
+      (fabsf(crouchOffsetL - lastIssuedCrouchL) > 0.01f ||
+       fabsf(crouchOffsetR - lastIssuedCrouchR) > 0.01f)) {
+    lastIssuedCrouchL = crouchOffsetL;
+    lastIssuedCrouchR = crouchOffsetR;
+    moveActive = false;               // abandon any interpolation in flight
+    computeDesiredFoot(cur_x, cur_y); // the rate IS the trajectory
+    solveGoalsFor(cur_x, cur_y);      // cache counts; the 10 Hz hold write sends
   }
 
   // ── Ch7: IMU calibrate (momentary, rising edge) ──────────────────────────
   // Guarded on !motorsEnabled: startCalibration() holds the motors off for its
   // ~1 s sampling window, so triggering it while balancing drops the robot.
-  if (rc_raw[6] > 0) {
-    bool calSwitch = (rc_raw[6] > RC_SWITCH_ON);
+  // Ch5 = IMU calibrate (REMAPPED from Ch7, which is now ARM).
+  if (rc_raw[4] > 0) {
+    bool calSwitch = (rc_raw[4] > RC_SWITCH_ON);
     if (calSwitch && !rcPrevCal && !motorsEnabled) startCalibration();
     rcPrevCal = calSwitch;
   }
@@ -1310,12 +1640,10 @@ void readRC() {
   // ── Ch8: integral kill (2-position, active HIGH) ─────────────────────────
   // Active-HIGH so an unbound channel (which reads ~1000, i.e. LOW) leaves the
   // integrator running normally rather than silently disabling it.
-  if (rc_raw[7] > 0) {
-    if (rc_raw[7] > RC_SWITCH_ON) {
-      integral  = 0.0f;
-      trim_bias = 0.0f;
-    }
-  }
+  // (The old Ch8 "integral kill" switch is removed: Ch8 is now the target-rate
+  // pot. Leaving it would have let a pot above mid-travel continuously zero
+  // both integrators -- which, with the pot resting at ~1614 as logged, would
+  // have held the balance integral at 0 permanently.)
 }
 
 // ── SETUP ─────────────────────────────────────────────────────────────────────
@@ -1453,7 +1781,7 @@ void loop() {
         trim_bias  = constrain(trim_bias, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
       }
       lean_cmd   = (Kp_vel * vel_error) + trim_bias;
-      lean_cmd   = constrain(lean_cmd, -MAX_TRIM_BIAS, MAX_TRIM_BIAS);
+      lean_cmd   = constrain(lean_cmd, -MAX_LEAN_CMD, MAX_LEAN_CMD);
     } else {
       // Pure single-loop mode (TE0). The velocity loop is the ONLY thing that
       // can turn a drive command into motion, so with it off the drive stick is
@@ -1488,7 +1816,19 @@ void loop() {
     //
     // Sign convention matches the L/R spin cases in blue_pill_dev/motor_testing
     // and mcu_pos_wireless: positive steer = turn right = left wheel forward.
-    float steer = rc_arm ? (rc_steer * RC_MAX_STEER) : 0.0f;
+    // NEGATED. The sign convention below is right for the motor wiring, but
+    // this machine's Ch4 reads the opposite way round: stick left commanded a
+    // right turn. Inverting the axis here (rather than swapping the two _pwm
+    // lines) keeps the wiring convention documented above intact and puts the
+    // correction at the one place the transmitter's polarity enters.
+    // Expo-shaped, so the turn is proportional to how far the stick moved rather
+    // than snapping to full authority the moment it leaves centre. See
+    // RC_STEER_EXPO above -- pure command shaping, no feedback, no extra gains.
+    float a     = -rc_steer;                       // negated: see note above
+    float steer = rc_arm
+                  ? RC_MAX_STEER * (RC_STEER_EXPO * a * a * a +
+                                    (1.0f - RC_STEER_EXPO) * a)
+                  : 0.0f;
 
     float left_pwm  = -output + steer;
     float right_pwm = -output - steer;
@@ -1550,7 +1890,7 @@ void loop() {
       "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,"
       "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
       "TORQ:%d,CRL:%.1f,CRR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d,"
-      "RCL:%d,RCE:%d,RCA:%d,RCD:%.2f,RCS:%.2f,TVEL:%.1f\n",
+      "RCL:%d,RCE:%d,RCA:%d,RCD:%.2f,RCS:%.2f,TVEL:%.1f,RCT:%.2f,RC8:%u\n",
       pitch, output, integral, encL, encR, vel_current,
       (int)motorsEnabled, maxSafeTilt, lean_cmd,
       (int)autoTrimEnabled, (int)safetyLatched,
@@ -1558,7 +1898,8 @@ void loop() {
       cur_x[0], cur_y[0], cur_x[1], cur_y[1],
       (int)ikValid[0], (int)ikValid[1], (int)moveActive,
       (int)rcLinkOK, (int)rcEnabled, (int)rc_arm,
-      rc_drive, rc_steer, target_velocity);
+      rc_drive, rc_steer, target_velocity,
+      targetAngle, (unsigned)rc_raw[7]);
     if (n > 0 && n < (int)sizeof(line) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)line, n);
 
@@ -1587,10 +1928,11 @@ void loop() {
     if (++rcStateDiv >= 5) {
       rcStateDiv = 0;
       int r = snprintf(line, sizeof(line),
-        "RC:%u,%u,%u,%u,%u,%u,%u,%u,LINK:%d\n",
+        "RC:%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,LINK:%d\n",
         (unsigned)rc_raw[0], (unsigned)rc_raw[1], (unsigned)rc_raw[2],
         (unsigned)rc_raw[3], (unsigned)rc_raw[4], (unsigned)rc_raw[5],
-        (unsigned)rc_raw[6], (unsigned)rc_raw[7], (int)rcLinkOK);
+        (unsigned)rc_raw[6], (unsigned)rc_raw[7], (unsigned)rc_raw[8],
+        (unsigned)rc_raw[9], (int)rcLinkOK);
       if (r > 0 && r < (int)sizeof(line) && Serial3.availableForWrite() >= r)
         Serial3.write((uint8_t*)line, r);
     }
