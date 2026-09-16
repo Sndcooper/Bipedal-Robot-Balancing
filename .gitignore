@@ -1,3 +1,10 @@
 *.log
 *.csv
 logs/
+
+__pycache__/
+*.pyc
+.pio/
+.venv/
+venv/
+.vscode/
