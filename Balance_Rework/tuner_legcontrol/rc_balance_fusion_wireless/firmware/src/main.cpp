@@ -346,13 +346,17 @@ float target_velocity = 0.0f;           // counts/sec, forward positive
 // is why a single gain is enough here where the balance loop needs three.
 float yaw_current = 0.0f;               // counts/sec, + = turning right
 float yaw_target  = 0.0f;               // counts/sec commanded by the stick
-float Kp_yaw      = 0.09f;              // PWM counts per counts/sec error - KY
+// RETAINED BUT UNUSED by the control law: steering is open loop (see the
+// steer block in loop()). Kept, with their KY/RYF/RYA commands, so the closed
+// loop can be re-enabled for an experiment without another firmware revision.
+// Setting them has no effect while the open-loop law is in place.
+float Kp_yaw      = 0.02f;              // PWM counts per counts/sec error - KY
+// STILL LOAD-BEARING even with the loop gone: readRC() scales the shaped stick
+// into yaw_target with it, and the open-loop law divides it back out to recover
+// the -1..+1 command. Changing it does NOT change steering authority (that is
+// RC_MAX_STEER); it only rescales the YT telemetry. Keep it non-zero.
 float RC_MAX_YAW  = 700.0f;             // counts/sec at full steer stick  - RY
-// The open-loop PWM this used to be is now the STARTING GUESS, so the machine
-// still reacts on the same tick the stick moves instead of waiting for the P
-// term to build. 0 = pure feedback (laggy), 1 = pure open loop (the old
-// behaviour, no correction at all).
-float RC_YAW_FF   = 0.55f;              // feed-forward fraction           - RYF
+float RC_YAW_FF   = 0.55f;              // unused (see Kp_yaw)             - RYF
 // ── AUTHORITY BUDGET FOR THE CORRECTION TERM ──────────────────────────────
 // The total steer clamp is not enough on its own: it lets the P term spend the
 // WHOLE differential budget on heading error nobody asked to correct. Measured
@@ -365,7 +369,7 @@ float RC_YAW_FF   = 0.55f;              // feed-forward fraction           - RYF
 // balance PID for PWM. So the correction gets its own, much smaller budget;
 // a DELIBERATE turn is untouched because that arrives via feed-forward, which
 // still commands the full RC_MAX_STEER.
-float RC_YAW_AUTH = 25.0f;              // max PWM counts from the P term  - RYA
+float RC_YAW_AUTH = 20.0f;              // unused (see Kp_yaw)             - RYA
 // Clamped in DEGREES because that is what this loop outputs. 6 deg is a real
 // lean the robot can hold; the old 15 deg was 60% of the 25 deg safety cutoff,
 // so a wound-up bias could trip the cutoff on its own.
@@ -1823,7 +1827,25 @@ void loop() {
   // translation cancelled. Same EMA, because it is the same integer-quantised
   // noise: without it a 1-count/tick jitter is +-100 counts/sec of phantom yaw
   // at 100 Hz, and Kp_yaw would pump that straight into the motors.
-  float yaw_raw = (deltaL - deltaR) / dt;
+  //
+  // (deltaR - deltaL), NOT (deltaL - deltaR). This orientation is MEASURED, not
+  // derived: in serial_COM13_20260915_235020.log the commanded yaw (YT) and the
+  // measured yaw (YW) came out OPPOSITE in sign on 89 of 95 turning frames
+  // (97% on firm turns) -- e.g. YT +504 read back as YW -1050. With the
+  // subtraction the other way round, yaw_error = yaw_target - yaw_current
+  // evaluated to target PLUS the disturbance, so the "correction" reinforced
+  // the rotation: positive feedback. That is what pinned steer at full
+  // authority for up to 11.3 s and, whenever |steer| exceeded |PID_OUT|, made
+  // left=-out+steer and right=-out-steer diverge in sign so the robot spun in
+  // place instead of driving straight.
+  //
+  // The tempting derivation -- "+steer speeds the left wheel, so
+  // deltaL > deltaR" -- is locally true at every step but silently assumes the
+  // left motor's rotation reaches the left encoder positive after the mirror
+  // normalisation above. On this machine it does not. The robot is the
+  // authority on its own wiring, so the measurement is matched to the command
+  // convention here rather than inferred.
+  float yaw_raw = (deltaR - deltaL) / dt;
   yaw_current = vel_alpha * yaw_current + (1.0f - vel_alpha) * yaw_raw;
 
   prevEncoderLeft  = encL;
@@ -1928,34 +1950,35 @@ void loop() {
     // right turn. Inverting the axis here (rather than swapping the two _pwm
     // lines) keeps the wiring convention documented above intact and puts the
     // correction at the one place the transmitter's polarity enters.
-    // CLOSED-LOOP TURN RATE. yaw_target comes from the expo-shaped stick in
-    // readRC(); yaw_current is measured from the encoder difference above.
+    // ── OPEN-LOOP PROPORTIONAL STEERING ───────────────────────────────────
+    // Deliberately NOT a closed yaw-rate loop. There was one; it was removed
+    // after measuring it on hardware.
     //
-    //   steer = FF*(yaw_target/RC_MAX_YAW)*RC_MAX_STEER + Kp_yaw*(target - measured)
+    // The loop worked once its sign was fixed (YT/YW agreement 6% -> 99%,
+    // corr -0.86 -> +0.88, idle |YW| 474 -> 53). It was dropped because it
+    // could not earn its keep: turn tracking sat at YW/YT = 0.37, and it had no
+    // way to do better, since its own authority caps -- feed-forward 0.55*80 =
+    // 44 counts plus a 20-count P budget -- ceiling the command at 64 of 80
+    // while it averaged 47.6. The P term never reached its cap on a single turn
+    // frame, so nothing was saturating; the command was just small. Those caps
+    // existed only to restrain the loop back when its feedback was POSITIVE,
+    // and with the sign right they were throttling a healthy control.
     //
-    // The feed-forward term IS the old open-loop command, so response is
-    // unchanged on the tick the stick moves; the P term then corrects whatever
-    // the plant got wrong, which is what stops the achieved rate depending on
-    // battery voltage, floor friction and wheel loading.
+    // A yaw-RATE loop also cannot hold a heading: it nulls rate, not
+    // accumulated angle, so it never returns the robot to where it pointed.
+    // That is a heading (integrating) loop's job, and nothing here asks for one.
     //
-    // Sign check: +steer -> left wheel faster -> deltaL > deltaR -> yaw_raw > 0,
-    // so a positive error commands positive steer. Negative feedback, as needed.
+    // Open loop is honest here because the drive is symmetric: measured wheel
+    // efficiency is 0.252 (L) vs 0.259 (R) counts per PWM count, a ratio of
+    // 1.03, so there is no standing bias for feedback to trim out.
+    //
+    // rc_steer is already expo-shaped and sign-corrected for this transmitter
+    // in readRC(); yaw_target carries that same shaped value scaled to
+    // counts/sec, so dividing it back out recovers the -1..+1 command without
+    // duplicating the curve.
     float steer = 0.0f;
-    if (rc_arm) {
-      float yaw_ff    = RC_YAW_FF * (yaw_target / RC_MAX_YAW) * RC_MAX_STEER;
-      float yaw_error = yaw_target - yaw_current;
-
-      // The correction gets its OWN budget, clamped BEFORE it is added. A
-      // single clamp on the sum is not equivalent: that version let the P term
-      // consume the entire differential on heading error the operator never
-      // commanded (16% of idle ticks pinned hard over -- see RC_YAW_AUTH), and
-      // a pinned differential both steals PWM from the balance PID and reads,
-      // to the operator holding centre, as the robot refusing to track straight.
-      float yaw_corr = constrain(Kp_yaw * yaw_error, -RC_YAW_AUTH, RC_YAW_AUTH);
-
-      steer = yaw_ff + yaw_corr;
-      // Outer clamp still stands, so FF + correction together can never exceed
-      // the authority the open-loop version had.
+    if (rc_arm && RC_MAX_YAW > 1.0f) {
+      steer = (yaw_target / RC_MAX_YAW) * RC_MAX_STEER;
       steer = constrain(steer, -RC_MAX_STEER, RC_MAX_STEER);
     }
 
