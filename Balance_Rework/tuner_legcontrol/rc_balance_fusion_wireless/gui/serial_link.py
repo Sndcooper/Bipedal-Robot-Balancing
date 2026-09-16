@@ -91,6 +91,8 @@ class SerialLink:
             "channels":  [0] * 10,  # raw microseconds, Ch1..Ch10
             "max_crouch_rate": 3.0,
             "idle_states": {},   # RCCEN IDLE8/IDLE10, boot-resting switch positions
+            "yaw_current": 0.0,  # counts/sec measured from the encoder difference
+            "yaw_target":  0.0,  # counts/sec the steer stick is asking for
             "max_vel":    400.0,
             "max_steer":  40.0,
             "max_crouch": 40.0,
@@ -448,6 +450,12 @@ class SerialLink:
                 self.fw["targetAngle"] = data["RCT"]
             if "RC8"  in data:
                 self.rc["ch8_raw"]     = int(data["RC8"])
+            # Closed-loop turn rate: measured vs commanded, both counts/sec.
+            # Watching these two converge is how the Kp_yaw tune is judged.
+            if "YW"   in data:
+                self.rc["yaw_current"] = data["YW"]
+            if "YT"   in data:
+                self.rc["yaw_target"]  = data["YT"]
 
             if len(self.history["t"]) > 500:
                 for k in self.history:
@@ -578,6 +586,9 @@ class SerialLink:
             "TrimGain": "Ki_trim", "CrouchL": "crouchOffsetL", "CrouchR": "crouchOffsetR",
             "VP": "Kp_vel",
             "RV": "RC_MAX_VEL", "RS": "RC_MAX_STEER", "RCM": "RC_MAX_CROUCH",
+            # Closed-loop turn rate.
+            "KY": "Kp_yaw", "RY": "RC_MAX_YAW", "RYF": "RC_YAW_FF",
+            "RYA": "RC_YAW_AUTH",
         }
         try:
             _, payload = line.split("->", 1)
@@ -666,6 +677,11 @@ class SerialLink:
     def set_rc_enabled(self, enabled):  self._send(f"RE{1 if enabled else 0}")
     def set_rc_max_vel(self, val):      self._send(f"RV{val}")
     def set_rc_max_steer(self, val):    self._send(f"RS{val}")
+    # ── Closed-loop turn rate ────────────────────────────────────────────────
+    def set_yaw_p(self, val):           self._send(f"KY{val}")
+    def set_max_yaw(self, val):         self._send(f"RY{val}")
+    def set_yaw_ff(self, val):          self._send(f"RYF{val}")
+    def set_yaw_auth(self, val):        self._send(f"RYA{val}")
     def set_rc_max_crouch(self, val):   self._send(f"RCM{val}")
     def set_servo_position(self, servo_id, pos):
         self._send(f"PS{int(servo_id)} {int(pos)}")

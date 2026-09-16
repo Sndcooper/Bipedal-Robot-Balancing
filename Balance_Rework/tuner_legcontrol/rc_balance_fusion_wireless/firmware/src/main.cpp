@@ -325,6 +325,47 @@ float lean_cmd  = 0.0f;                 // TOTAL commanded lean = P + I (deg), t
 // it, using the same gains. Zero when the stick is centred, so with the TX
 // sticks at rest this firmware behaves EXACTLY like the variant it came from.
 float target_velocity = 0.0f;           // counts/sec, forward positive
+
+// ══ CLOSED-LOOP TURN RATE ═════════════════════════════════════════════════
+// Steering used to be an open-loop differential PWM: the same stick deflection
+// gave a different yaw rate as the battery sagged, the floor changed, or one
+// wheel took more load than the other, and nothing measured the difference.
+//
+// The measurement is free. deltaL and deltaR are already mirror-normalised in
+// the encoder block below (both count positive going forward), so:
+//     deltaL + deltaR  -> pure TRANSLATION, rotation cancels  -> vel_current
+//     deltaL - deltaR  -> pure ROTATION, translation cancels  -> yaw_current
+// Both encoders are read every tick regardless, so this costs one subtraction.
+//
+// ONE P GAIN, deliberately, and this is not a second PID:
+//   * no integrator -- it would wind up against a wheel that is scrubbing
+//     rather than rolling, then dump that authority when it broke free;
+//   * no derivative -- yaw_current is already an EMA of a difference of
+//     integers, so differentiating it again is pure noise amplification.
+// Feed-forward carries the response and the P term only trims the error, which
+// is why a single gain is enough here where the balance loop needs three.
+float yaw_current = 0.0f;               // counts/sec, + = turning right
+float yaw_target  = 0.0f;               // counts/sec commanded by the stick
+float Kp_yaw      = 0.09f;              // PWM counts per counts/sec error - KY
+float RC_MAX_YAW  = 700.0f;             // counts/sec at full steer stick  - RY
+// The open-loop PWM this used to be is now the STARTING GUESS, so the machine
+// still reacts on the same tick the stick moves instead of waiting for the P
+// term to build. 0 = pure feedback (laggy), 1 = pure open loop (the old
+// behaviour, no correction at all).
+float RC_YAW_FF   = 0.55f;              // feed-forward fraction           - RYF
+// ── AUTHORITY BUDGET FOR THE CORRECTION TERM ──────────────────────────────
+// The total steer clamp is not enough on its own: it lets the P term spend the
+// WHOLE differential budget on heading error nobody asked to correct. Measured
+// in serial_COM13_20260915_235020.log over 1085 frames with no turn commanded,
+// Kp_yaw*YW alone saturated the full +-RC_MAX_STEER on 16% of ticks and passed
+// half authority on 39%, because idle |YW| runs a median 352 c/s (peak 1466)
+// while only 80/0.09 = 889 is needed to saturate.
+//
+// On a machine that must stay upright, a heading trim must never outbid the
+// balance PID for PWM. So the correction gets its own, much smaller budget;
+// a DELIBERATE turn is untouched because that arrives via feed-forward, which
+// still commands the full RC_MAX_STEER.
+float RC_YAW_AUTH = 25.0f;              // max PWM counts from the P term  - RYA
 // Clamped in DEGREES because that is what this loop outputs. 6 deg is a real
 // lean the robot can hold; the old 15 deg was 60% of the 25 deg safety cutoff,
 // so a wound-up bias could trip the cutoff on its own.
@@ -879,7 +920,11 @@ void parseCommand(char *cmd) {
   // 224, not 160: the "Updated ->" ack below now carries the three RC limits
   // as well, and snprintf would silently truncate the tail fields the GUI
   // parses. Sized with headroom for the widest float formatting.
-  char ack[224];
+  // 288, not 224. The "Updated ->" ack now also carries the yaw-rate gains,
+  // and snprintf drops the TAIL fields when short -- which is where they are,
+  // so a too-small buffer shows up as "the new slider never syncs" rather than
+  // as any kind of error.
+  char ack[288];
 
   // PING:<token> → PONG:<token>  (keeps latency_test.py working)
   if (cmd[0]=='P' && cmd[1]=='I' && cmd[2]=='N' && cmd[3]=='G') {
@@ -1082,6 +1127,24 @@ void parseCommand(char *cmd) {
     // mm/sec of crouch travel while Ch10 is held.
     RC_CROUCH_RATE = constrain(atof(cmd + 3), 0.1f, 200.0f);
   }
+  else if (cmd[0]=='K' && cmd[1]=='Y') {
+    // PWM counts of differential per counts/sec of yaw-rate error.
+    Kp_yaw = constrain(atof(cmd + 2), 0.0f, 2.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='Y' && cmd[2]=='A') {
+    // PWM counts the yaw P term may command on its own. 0 disables heading
+    // correction entirely and leaves pure open-loop feed-forward steering.
+    RC_YAW_AUTH = constrain(atof(cmd + 3), 0.0f, 120.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='Y' && cmd[2]=='F') {
+    // Feed-forward fraction: 0 = pure feedback, 1 = old open-loop behaviour.
+    RC_YAW_FF = constrain(atof(cmd + 3), 0.0f, 1.0f);
+  }
+  else if (cmd[0]=='R' && cmd[1]=='Y') {
+    // Counts/sec of yaw rate commanded at full steer stick. Checked AFTER RYF
+    // so "RYF0.5" can never be parsed as RY with a garbage tail.
+    RC_MAX_YAW = constrain(atof(cmd + 2), 0.0f, 3000.0f);
+  }
   else if (cmd[0]=='R' && cmd[1]=='S' && cmd[2]=='E') {
     // Steering expo blend, 0 = linear .. 1 = fully cubic.
     RC_STEER_EXPO = constrain(atof(cmd + 3), 0.0f, 1.0f);
@@ -1202,9 +1265,11 @@ void parseCommand(char *cmd) {
 
   // Ack for tuning commands — parsed by _parse_fw_update() in the GUI.
   snprintf(ack, sizeof(ack),
-    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f CrouchL:%.2f CrouchR:%.2f VP:%.4f RV:%.1f RS:%.1f RCM:%.1f",
+    "Updated -> P:%.3f I:%.3f D:%.3f Offset:%.4f Target:%.3f Alpha:%.4f Tilt:%.2f TrimGain:%.4f CrouchL:%.2f CrouchR:%.2f VP:%.4f RV:%.1f RS:%.1f RCM:%.1f "
+    "KY:%.3f RY:%.1f RYF:%.2f RYA:%.1f",
     Kp, Ki, Kd, pitchOffset, targetAngle, alpha, maxSafeTilt, Ki_trim, crouchOffsetL, crouchOffsetR, Kp_vel,
-    RC_MAX_VEL, RC_MAX_STEER, RC_MAX_CROUCH);
+    RC_MAX_VEL, RC_MAX_STEER, RC_MAX_CROUCH,
+    Kp_yaw, RC_MAX_YAW, RC_YAW_FF, RC_YAW_AUTH);
   uint8_t len = (uint8_t)strlen(ack);
   ack[len] = '\n'; len++;
   if (Serial3.availableForWrite() >= len)
@@ -1467,7 +1532,25 @@ void readRC() {
   // Drive stick -> velocity setpoint for the outer loop. Only while armed;
   // a stick pushed before arming must not bank a setpoint that takes effect
   // the instant the motors come on.
-  target_velocity = (motorsEnabled && rc_arm) ? (rc_drive * RC_MAX_VEL) : 0.0f;
+  // ── EXPO ON DRIVE ────────────────────────────────────────────────────────
+  // Drive was already a velocity command, so it was "proportional" in the loop
+  // sense, but it had no curve: the first millimetre of stick threw a large
+  // velocity step at the outer loop. The cubic blend keeps full RC_MAX_VEL at
+  // the stops and softens everything around centre, which is where the operator
+  // does the fine work. Shares RC_STEER_EXPO with the steering below so drive
+  // and turn feel like one control rather than two differently-geared ones.
+  float dA = rc_drive;
+  float driveShaped = RC_STEER_EXPO * dA * dA * dA + (1.0f - RC_STEER_EXPO) * dA;
+  target_velocity = (motorsEnabled && rc_arm) ? (driveShaped * RC_MAX_VEL) : 0.0f;
+
+  // ── STEER STICK -> YAW RATE TARGET ───────────────────────────────────────
+  // Same curve, and negated for the same reason the old PWM path was: this
+  // machine's Ch4 reads the opposite way round (stick left commanded a right
+  // turn). Putting the inversion here, at the one place the transmitter's
+  // polarity enters, keeps the motor-wiring convention downstream intact.
+  float sA = -rc_steer;
+  float steerShaped = RC_STEER_EXPO * sA * sA * sA + (1.0f - RC_STEER_EXPO) * sA;
+  yaw_target = (motorsEnabled && rc_arm) ? (steerShaped * RC_MAX_YAW) : 0.0f;
 
   // ── Ch5: ARM / DISARM (2-position switch, edge-detected) ─────────────────
   // Interlock: the switch must be observed LOW at least once since boot (or
@@ -1622,9 +1705,24 @@ void readRC() {
        fabsf(crouchOffsetR - lastIssuedCrouchR) > 0.01f)) {
     lastIssuedCrouchL = crouchOffsetL;
     lastIssuedCrouchR = crouchOffsetR;
-    moveActive = false;               // abandon any interpolation in flight
+    // NO INTERPOLATION, and no waiting for the 10 Hz hold-pose writer either:
+    // the foot position is written straight through and the goals go on the bus
+    // on this same tick, so the legs track the commanded mm/sec with nothing
+    // filtering it.
+    //
+    // EXPECT POSSIBLE STEPPING. At 7.5 mm/sec on a 10 ms tick this is 0.075 mm
+    // per write, well under the AX-12's own position resolution (~0.29 deg), so
+    // consecutive writes will often land on the same count and the motion can
+    // look stepped rather than smooth. If it does, the fix is a slower rate or
+    // a small first-order filter on cur_y -- NOT the trajectory interpolator,
+    // which structurally cannot chase a setpoint that keeps moving (see above).
+    //
+    // Gated on POLL_IDLE so this write cannot collide with the reply bytes of
+    // an in-flight servo health read on the half-duplex bus.
+    moveActive = false;               // cancel any interpolation in flight
     computeDesiredFoot(cur_x, cur_y); // the rate IS the trajectory
-    solveGoalsFor(cur_x, cur_y);      // cache counts; the 10 Hz hold write sends
+    solveGoalsFor(cur_x, cur_y);
+    if (g_torqueOn && pollState == POLL_IDLE) ax12SyncWriteGoals();
   }
 
   // ── Ch7: IMU calibrate (momentary, rising edge) ──────────────────────────
@@ -1719,6 +1817,15 @@ void loop() {
   float deltaR = -(float)(encR - prevEncoderRight);   // mirror-mount normalise
   float vel_raw = ((deltaL + deltaR) * 0.5f) / dt;
   vel_current = vel_alpha * vel_current + (1.0f - vel_alpha) * vel_raw;
+
+  // YAW RATE from the SAME two deltas, opposite combination. The sum above is
+  // translation with rotation cancelled; this difference is rotation with
+  // translation cancelled. Same EMA, because it is the same integer-quantised
+  // noise: without it a 1-count/tick jitter is +-100 counts/sec of phantom yaw
+  // at 100 Hz, and Kp_yaw would pump that straight into the motors.
+  float yaw_raw = (deltaL - deltaR) / dt;
+  yaw_current = vel_alpha * yaw_current + (1.0f - vel_alpha) * yaw_raw;
+
   prevEncoderLeft  = encL;
   prevEncoderRight = encR;
 
@@ -1821,14 +1928,36 @@ void loop() {
     // right turn. Inverting the axis here (rather than swapping the two _pwm
     // lines) keeps the wiring convention documented above intact and puts the
     // correction at the one place the transmitter's polarity enters.
-    // Expo-shaped, so the turn is proportional to how far the stick moved rather
-    // than snapping to full authority the moment it leaves centre. See
-    // RC_STEER_EXPO above -- pure command shaping, no feedback, no extra gains.
-    float a     = -rc_steer;                       // negated: see note above
-    float steer = rc_arm
-                  ? RC_MAX_STEER * (RC_STEER_EXPO * a * a * a +
-                                    (1.0f - RC_STEER_EXPO) * a)
-                  : 0.0f;
+    // CLOSED-LOOP TURN RATE. yaw_target comes from the expo-shaped stick in
+    // readRC(); yaw_current is measured from the encoder difference above.
+    //
+    //   steer = FF*(yaw_target/RC_MAX_YAW)*RC_MAX_STEER + Kp_yaw*(target - measured)
+    //
+    // The feed-forward term IS the old open-loop command, so response is
+    // unchanged on the tick the stick moves; the P term then corrects whatever
+    // the plant got wrong, which is what stops the achieved rate depending on
+    // battery voltage, floor friction and wheel loading.
+    //
+    // Sign check: +steer -> left wheel faster -> deltaL > deltaR -> yaw_raw > 0,
+    // so a positive error commands positive steer. Negative feedback, as needed.
+    float steer = 0.0f;
+    if (rc_arm) {
+      float yaw_ff    = RC_YAW_FF * (yaw_target / RC_MAX_YAW) * RC_MAX_STEER;
+      float yaw_error = yaw_target - yaw_current;
+
+      // The correction gets its OWN budget, clamped BEFORE it is added. A
+      // single clamp on the sum is not equivalent: that version let the P term
+      // consume the entire differential on heading error the operator never
+      // commanded (16% of idle ticks pinned hard over -- see RC_YAW_AUTH), and
+      // a pinned differential both steals PWM from the balance PID and reads,
+      // to the operator holding centre, as the robot refusing to track straight.
+      float yaw_corr = constrain(Kp_yaw * yaw_error, -RC_YAW_AUTH, RC_YAW_AUTH);
+
+      steer = yaw_ff + yaw_corr;
+      // Outer clamp still stands, so FF + correction together can never exceed
+      // the authority the open-loop version had.
+      steer = constrain(steer, -RC_MAX_STEER, RC_MAX_STEER);
+    }
 
     float left_pwm  = -output + steer;
     float right_pwm = -output - steer;
@@ -1885,12 +2014,20 @@ void loop() {
     // ── Balance telemetry (10 Hz) ────────────────────────────────────────────
     // Extended with leg subsystem state fields so the GUI can display both
     // the balance loop AND the AX-12 trajectory/mode in one pass.
-    char line[256];
+    // 384, not 256. Adding the yaw fields pushes the WORST-CASE frame (large
+    // negative encoder counts and a saturated yaw rate at the same time) past
+    // 256, and snprintf truncates SILENTLY from the tail -- which is exactly
+    // where newly-added fields land. An undersized buffer therefore does not
+    // error, it just makes the new telemetry vanish once the numbers get big.
+    // Matches SERIAL_TX_BUFFER_SIZE=384 in platformio.ini, so a full frame
+    // still clears the availableForWrite() guard below in one go.
+    char line[384];
     int n = snprintf(line, sizeof(line),
       "PITCH:%.2f,PID_OUT:%.2f,INT:%.4f,EL:%ld,ER:%ld,VEL:%.1f,"
       "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
       "TORQ:%d,CRL:%.1f,CRR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d,"
-      "RCL:%d,RCE:%d,RCA:%d,RCD:%.2f,RCS:%.2f,TVEL:%.1f,RCT:%.2f,RC8:%u\n",
+      "RCL:%d,RCE:%d,RCA:%d,RCD:%.2f,RCS:%.2f,TVEL:%.1f,RCT:%.2f,RC8:%u,"
+      "YW:%.0f,YT:%.0f\n",
       pitch, output, integral, encL, encR, vel_current,
       (int)motorsEnabled, maxSafeTilt, lean_cmd,
       (int)autoTrimEnabled, (int)safetyLatched,
@@ -1899,7 +2036,8 @@ void loop() {
       (int)ikValid[0], (int)ikValid[1], (int)moveActive,
       (int)rcLinkOK, (int)rcEnabled, (int)rc_arm,
       rc_drive, rc_steer, target_velocity,
-      targetAngle, (unsigned)rc_raw[7]);
+      targetAngle, (unsigned)rc_raw[7],
+      yaw_current, yaw_target);
     if (n > 0 && n < (int)sizeof(line) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)line, n);
 
