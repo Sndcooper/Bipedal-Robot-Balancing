@@ -492,6 +492,14 @@ uint8_t  poseMode   = MODE_CROUCH;
 // now, so this figure only shapes CR/CRL/CRR/FT/mode-change moves.
 uint16_t moveTimeMs = 240;              // MT<n>, 100-3000 ms per move
 bool     moveActive = false;
+// Set by the RC crouch path in readRC() when cur_*/goalPos have been updated
+// and need to reach the servos. NOT written to the bus there: readRC() runs at
+// the top of loop(), before the 3-mode bus arbiter, so writing from it puts a
+// SECOND Serial2 transaction in a tick that is architecturally allowed exactly
+// one. Doing that corrupted the half-duplex byte accounting and permanently
+// killed the bus 3 s into the first crouch (see the crouch block in readRC()).
+// The arbiter consumes this flag in its own slot instead.
+bool     crouchDirty = false;
 unsigned long moveStartMs = 0;
 float mv_x0[2], mv_y0[2];               // where the move started
 float mv_x1[2], mv_y1[2];               // where it ends
@@ -1721,12 +1729,25 @@ void readRC() {
     // a small first-order filter on cur_y -- NOT the trajectory interpolator,
     // which structurally cannot chase a setpoint that keeps moving (see above).
     //
-    // Gated on POLL_IDLE so this write cannot collide with the reply bytes of
-    // an in-flight servo health read on the half-duplex bus.
+    // THE BUS IS NOT TOUCHED HERE. readRC() runs at the top of loop(), before
+    // the "exactly one Serial2 transaction per tick" arbiter below. An earlier
+    // version called ax12SyncWriteGoals() right here, guarded on POLL_IDLE.
+    // That guard was useless: it tests whether a READ is in flight, not whether
+    // the arbiter is about to WRITE, so the tick ended up carrying two
+    // transactions -- this one plus applySettingsTask() or the hold-pose write.
+    // On a half-duplex 1 Mbaud bus the second packet overlapped the first (or
+    // its echo), the poll state machine's fixed 8-echo/10-reply byte accounting
+    // shifted, and every later read mis-parsed. Logged result: all four servos
+    // healthy for 95 s, then fail counts climbing 3 s into the first crouch and
+    // never recovering -- the robot crouched and could not stand back up.
+    //
+    // So: update the pose, flag it, and let the arbiter do the write in its own
+    // slot. Costs a few hundred microseconds of latency, i.e. 0.0006 mm at
+    // 7.5 mm/s -- four orders of magnitude below AX-12 resolution.
     moveActive = false;               // cancel any interpolation in flight
     computeDesiredFoot(cur_x, cur_y); // the rate IS the trajectory
-    solveGoalsFor(cur_x, cur_y);
-    if (g_torqueOn && pollState == POLL_IDLE) ax12SyncWriteGoals();
+    solveGoalsFor(cur_x, cur_y);      // cache counts; the arbiter sends them
+    crouchDirty = true;
   }
 
   // ── Ch7: IMU calibrate (momentary, rising edge) ──────────────────────────
@@ -2015,14 +2036,26 @@ void loop() {
   } else {
     // Hold pose at 10 Hz — re-asserts goals to fight servo drift, but at a
     // cadence slow enough that the health poll can run in the gaps.
+    //
+    // crouchDirty jumps the 10 Hz timer: an RC crouch is actively moving the
+    // legs and should reach the servos on the next tick, not up to 100 ms
+    // later. It still goes out HERE, inside the arbiter, so the tick carries
+    // exactly one Serial2 transaction — the invariant this whole block exists
+    // to enforce, and the one the old in-readRC() write violated.
     static unsigned long lastHoldUs = 0;
-    if (g_torqueOn && pollState == POLL_IDLE && now - lastHoldUs >= 100000) {
-      lastHoldUs = now;
+    bool wantHold = crouchDirty || (now - lastHoldUs >= 100000);
+    if (g_torqueOn && pollState == POLL_IDLE && wantHold) {
+      lastHoldUs  = now;
+      crouchDirty = false;
       ax12SyncWriteGoals();
+    } else {
+      // Only poll when the write slot was not used, so the two can never share
+      // a tick. (Previously the poll ran on its own alternating cycle, which
+      // was safe only because the write was strictly 10 Hz.)
+      static bool isReadCycle = false;
+      isReadCycle = !isReadCycle;
+      if (isReadCycle) pollLegServosTask();
     }
-    static bool isReadCycle = false;
-    isReadCycle = !isReadCycle;
-    if (isReadCycle) pollLegServosTask();
   }
 
   // ── TELEMETRY @ 10 Hz ────────────────────────────────────────────────────
