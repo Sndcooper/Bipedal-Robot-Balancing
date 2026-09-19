@@ -270,6 +270,29 @@ float accelPitchRaw = 0.0f;
 float gyroRate = 0.0f;
 #define GYRO_PITCH_SIGN 1.0f     // flip to -1.0f if pitch runs the wrong way
 
+// -- DERIVATIVE LOW-PASS ----------------------------------------------------
+// gyroRate is the only completely unfiltered signal in the control path:
+// `pitch` gets the complementary filter, gyroRate gets nothing, and it IS the
+// whole derivative term. At Kd 3.52 a 40 deg/s noise spike becomes ~140 PWM
+// counts -- over half the actuator range -- injected in a single tick.
+//
+// This is NOT what caused the jittery sessions. Measured across 13 logs,
+// corr(Kd, jitter) = +0.15 (no relationship); the actual correlate was motor
+// authority at -0.62. It IS why Kd behaved like a broken knob while chasing
+// that problem: Kd multiplies signal and noise equally, so past a point each
+// increment adds more hash than damping, and raising Kd to settle an
+// oscillation made it rougher instead of calmer.
+//
+// 0.70 at 100 Hz is a 5.7 Hz corner (fc = -ln(a)*fs/2pi): above the ~1 Hz
+// balance dynamics the D term exists to damp, below the band that was being
+// amplified. 0.85 -> 2.6 Hz (quieter, laggier); 0.5 -> 11 Hz (sharper, noisier).
+//
+// SEPARATE from `alpha` (0.96) on purpose. That one filters the ANGLE for the
+// P term; at 100 Hz it is a 0.65 Hz corner, and applying that to a RATE
+// signal would add enough phase lag to destabilise the very loop D damps.
+float D_FILT_ALPHA  = 0.70f;   // 0 = unfiltered .. 0.95 = very smooth   - DF cmd
+float derivFiltered = 0.0f;    // low-passed -gyroRate; the PID D input
+
 // ── THE SINGLE BALANCE PID (the ONLY control loop) ───────────────────────────
 float Kp = 78.0f, Ki = 650.0f, Kd = 3.52f;   // neutral bench-tuning start
 float integral = 0.0f;
@@ -282,6 +305,15 @@ float maxSafeTilt = 25.0f;                  // safety cutoff threshold (deg)
 // integrator saturated the output long before its own clamp ever engaged.
 // Logged sessions showed it pinned at the clamp while the robot fell over.
 const float MAX_INTEGRAL_PWM = 64.0f;       // 25% of range, leaves Kp/Kd headroom
+
+// Rolling ~1 s actuator-saturation census -> the SAT telemetry field, in
+// percent. PID_OUT is printed PRE-clamp, so without this a log cannot tell a
+// merely large command from one pinned at the rail with the loop no longer
+// closing. Sustained non-zero SAT has meant a tired battery on this machine
+// far more often than a wrong gain.
+uint16_t satWindow  = 0;
+uint16_t satCount   = 0;
+uint8_t  satPercent = 0;
 
 // ── ENCODER VELOCITY (telemetry display; also feeds auto-trim below) ────────
 float vel_current = 0.0f;
@@ -1126,6 +1158,14 @@ void parseCommand(char *cmd) {
     // a target the robot cannot reach just means a permanently saturated lean.
     RC_MAX_VEL = constrain(atof(cmd + 2), 0.0f, 2000.0f);
   }
+  else if (cmd[0]=='R' && cmd[1]=='S' && cmd[2]=='E') {
+    // Steering/drive expo blend, 0 = linear .. 1 = fully cubic.
+    // MUST be tested BEFORE the bare "RS" case below, for exactly the reason
+    // RYF is tested before RY: "RSE0.3" also matches cmd[0]=='R',cmd[1]=='S',
+    // and the RS branch would then run atof("E0.3") == 0.0 and silently set
+    // RC_MAX_STEER = 0 -- i.e. an expo change would kill steering outright.
+    RC_STEER_EXPO = constrain(atof(cmd + 3), 0.0f, 1.0f);
+  }
   else if (cmd[0]=='R' && cmd[1]=='S') {
     // PWM counts of differential steer at full stick. Kept well under 255 so
     // steering can never on its own saturate a motor and starve the balance
@@ -1157,10 +1197,6 @@ void parseCommand(char *cmd) {
     // so "RYF0.5" can never be parsed as RY with a garbage tail.
     RC_MAX_YAW = constrain(atof(cmd + 2), 0.0f, 3000.0f);
   }
-  else if (cmd[0]=='R' && cmd[1]=='S' && cmd[2]=='E') {
-    // Steering expo blend, 0 = linear .. 1 = fully cubic.
-    RC_STEER_EXPO = constrain(atof(cmd + 3), 0.0f, 1.0f);
-  }
   else if (cmd[0]=='R' && cmd[1]=='T' && cmd[2]=='R') {
     // deg/sec of target-angle travel while Ch8 is held.
     RC_TARGET_RATE = constrain(atof(cmd + 3), 0.001f, 5.0f);
@@ -1188,6 +1224,14 @@ void parseCommand(char *cmd) {
   // VP<f> — outer-loop proportional gain, deg of lean per (count/s).
   // Checked before any single-char 'V' case would be (there are none), and
   // before 'T'/'C' so it can never be mistaken for tilt or calibrate.
+  else if (cmd[0]=='D' && cmd[1]=='F') {
+    // Derivative low-pass coefficient. Capped at 0.95: past that the D term
+    // lags far enough that it stops being damping and becomes a phase problem.
+    // Tested BEFORE the bare 'D' (Kd) case for the same reason RSE must be
+    // tested before RS -- otherwise "DF0.7" parses as Kd = atof("F0.7") = 0
+    // and silently removes all damping.
+    D_FILT_ALPHA = constrain(atof(cmd + 2), 0.0f, 0.95f);
+  }
   else if (cmd[0]=='V' && cmd[1]=='P') Kp_vel = atof(cmd + 2);
   else if (cmd[0]=='P' && cmd[1]=='S') {
     // Raw per-servo position, e.g. "PS6 750" — bypasses the crouch IK entirely,
@@ -1472,6 +1516,7 @@ void readRC() {
         motorsEnabled = false;
         setMotors(0, 0);
         integral = 0.0f; trim_bias = 0.0f;
+        derivFiltered = 0.0f;
         Serial3.println("SAFETY:RC_LINK_LOST");
       }
     }
@@ -1527,6 +1572,7 @@ void readRC() {
       motorsEnabled = false;
       setMotors(0, 0);
       integral = 0.0f; trim_bias = 0.0f; target_velocity = 0.0f;
+      derivFiltered = 0.0f;
       Serial3.println("Motors DISABLED");
     }
     return;
@@ -1600,6 +1646,7 @@ void readRC() {
       motorsEnabled = false;
       setMotors(0, 0);
       integral = 0.0f; trim_bias = 0.0f; target_velocity = 0.0f;
+      derivFiltered = 0.0f;
       Serial3.println("Motors DISABLED");
     }
   }
@@ -1954,8 +2001,25 @@ void loop() {
       integral = 0.0f;                       // Ki off: never bank a latent kick
     }
 
-    float derivative = -gyroRate;            // derivative on measurement
+    // Derivative on MEASUREMENT (not error), now low-passed. Filtered HERE
+    // rather than at the source so readIMU() keeps the raw rate: the
+    // complementary filter does its own blending with `alpha`, and
+    // double-filtering would add lag to the angle estimate as well.
+    derivFiltered = D_FILT_ALPHA * derivFiltered
+                  + (1.0f - D_FILT_ALPHA) * (-gyroRate);
+    float derivative = derivFiltered;
     output = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+    // Actuator-saturation census over ~1 s (100 ticks at 100 Hz). Counted on
+    // the PRE-clamp value, which is the whole point: it records how far past
+    // the rail the controller WANTED to go.
+    satWindow++;
+    if (fabsf(output) > 255.0f) satCount++;
+    if (satWindow >= 100) {
+      satPercent = (uint8_t)((satCount * 100) / satWindow);
+      satWindow  = 0;
+      satCount   = 0;
+    }
 
     // ── STEERING — differential trim, applied AFTER the balance PID ────────
     // This is the only correct place for it. The balance PID owns the COMMON
@@ -2083,7 +2147,7 @@ void loop() {
       "MOT:%d,TILT:%.1f,TRIM:%.3f,ATE:%d,LATCH:%d,"
       "TORQ:%d,CRL:%.1f,CRR:%.1f,FX1:%.2f,FY1:%.2f,FX2:%.2f,FY2:%.2f,IK1:%d,IK2:%d,MOVE:%d,"
       "RCL:%d,RCE:%d,RCA:%d,RCD:%.2f,RCS:%.2f,TVEL:%.1f,RCT:%.2f,RC8:%u,"
-      "YW:%.0f,YT:%.0f\n",
+      "YW:%.0f,YT:%.0f,SAT:%u\n",
       pitch, output, integral, encL, encR, vel_current,
       (int)motorsEnabled, maxSafeTilt, lean_cmd,
       (int)autoTrimEnabled, (int)safetyLatched,
@@ -2093,7 +2157,7 @@ void loop() {
       (int)rcLinkOK, (int)rcEnabled, (int)rc_arm,
       rc_drive, rc_steer, target_velocity,
       targetAngle, (unsigned)rc_raw[7],
-      yaw_current, yaw_target);
+      yaw_current, yaw_target, (unsigned)satPercent);
     if (n > 0 && n < (int)sizeof(line) && Serial3.availableForWrite() >= n)
       Serial3.write((uint8_t*)line, n);
 

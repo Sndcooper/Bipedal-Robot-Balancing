@@ -91,6 +91,7 @@ class SerialLink:
             "channels":  [0] * 10,  # raw microseconds, Ch1..Ch10
             "max_crouch_rate": 3.0,
             "idle_states": {},   # RCCEN IDLE8/IDLE10, boot-resting switch positions
+            "sat_pct":    0,     # % of the last ~1s of ticks with PWM at +-255
             "yaw_current": 0.0,  # counts/sec measured from the encoder difference
             "yaw_target":  0.0,  # counts/sec the steer stick is asking for
             "max_vel":    400.0,
@@ -456,6 +457,13 @@ class SerialLink:
                 self.rc["yaw_current"] = data["YW"]
             if "YT"   in data:
                 self.rc["yaw_target"]  = data["YT"]
+            # Actuator saturation, percent of the last ~1 s. PID_OUT is a
+            # PRE-clamp value, so this is the only field that distinguishes a
+            # large command from one pinned at the rail with the loop open.
+            # Sustained non-zero here means the robot is out of motor -- check
+            # the battery before touching a gain.
+            if "SAT"  in data:
+                self.rc["sat_pct"]     = int(data["SAT"])
 
             if len(self.history["t"]) > 500:
                 for k in self.history:
@@ -677,6 +685,11 @@ class SerialLink:
     def set_rc_enabled(self, enabled):  self._send(f"RE{1 if enabled else 0}")
     def set_rc_max_vel(self, val):      self._send(f"RV{val}")
     def set_rc_max_steer(self, val):    self._send(f"RS{val}")
+    # Expo blend shared by the drive and steer sticks: 0 = linear, 1 = cubic.
+    # NOTE: the firmware must test "RSE" BEFORE the bare "RS" case, or this
+    # command lands in the RS branch as atof("E...") == 0 and zeroes
+    # RC_MAX_STEER (= no steering at all). Fixed in main.cpp; do not reorder.
+    def set_rc_steer_expo(self, val):   self._send(f"RSE{val}")
     # ── Closed-loop turn rate ────────────────────────────────────────────────
     def set_yaw_p(self, val):           self._send(f"KY{val}")
     def set_max_yaw(self, val):         self._send(f"RY{val}")

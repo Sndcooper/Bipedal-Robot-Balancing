@@ -60,6 +60,25 @@ PARAM_SPECS = [
     ParamSpec("crouchOffsetR","Crouch R",0.0,  80.0, 1.0,  10.0,  0.1,    1,   0.0),
 ]
 
+# Transmitter feel. None of these were reachable from the GUI before: the
+# firmware has had RV/RS/RSE all along and serial_link had the setters, but
+# nothing ever called them, so the only way to change stick feel was to reflash.
+#
+# Every start_val here MIRRORS the firmware's own compiled-in default, so
+# opening the GUI changes nothing by itself -- these are knobs to turn, not a
+# new tune being imposed. Suggested directions, to try ONE at a time:
+#   RC Steer Auth 80 -> ~110 if turning feels weak (logged turn tracking was
+#     0.58 of commanded, with a motor clipping on only 3.9% of ticks, so the
+#     authority simply was not there; firmware clamps this at 120)
+#   RC Expo 0.6 -> ~0.3 if the drive stick feels all-or-nothing (at 0.6, plus
+#     the 75 us deadband, half stick returns only 21% of max velocity)
+#   RC Max Vel 800 -> lower only if stick-release overshoot is the complaint
+RC_PARAM_SPECS = [
+    ParamSpec("RC_MAX_STEER", "RC Steer Auth", 0.0, 120.0, 1.0, 20.0, 0.5, 1,  80.0),
+    ParamSpec("RC_MAX_VEL",   "RC Max Vel",    0.0, 2000.0, 10.0, 200.0, 5.0, 0, 800.0),
+    ParamSpec("RC_STEER_EXPO","RC Expo",       0.0,   1.0, 0.05,  0.2, 0.01, 2,   0.60),
+]
+
 # IK foot-target parameters (mm)
 IK_PARAM_SPECS = [
     ParamSpec("fx1",  "Leg1 X",  -100.0, 100.0,  1.0, 10.0, 0.1, 1,   1.0),
@@ -337,12 +356,50 @@ class BalanceTunerTab(ttk.Frame):
                     variable=self.crouch_mirror_var
                 ).pack(anchor="w", padx=5, pady=(0, 4))
 
+        # ── Transmitter feel ────────────────────────────────────────────────
+        # Separate frame, because these do NOT touch the balance loop: they
+        # shape what the sticks ask for, upstream of every gain above.
+        rc_frame = ttk.LabelFrame(self, text="RC Feel  (steer authority / speed / expo)")
+        rc_frame.grid(row=1, column=1, sticky="nsew", pady=(6, 0))
+        for spec in RC_PARAM_SPECS:
+            ctrl = CoarseFineSlider(rc_frame, spec, spec.start_val, self._on_slider)
+            ctrl.pack(fill=tk.X, pady=4, padx=5)
+            self.sliders[spec.key] = ctrl
+
+        # The sliders above only transmit when they MOVE, so on a fresh connect
+        # the firmware is still running its own compiled-in defaults while the
+        # GUI displays these. This pushes the displayed set down in one go.
+        btn_push = ttk.Button(
+            rc_frame, text="⬇ Push All Displayed Gains to Firmware",
+            command=self.push_all_params
+        )
+        btn_push.pack(fill=tk.X, padx=5, pady=(8, 4))
+
         # Save tuned values with comment button
         btn_save = ttk.Button(
             tuning_frame, text="💾 Save Tuned Params (with Comment)",
             command=self.app.save_params_with_comment
         )
         btn_save.pack(fill=tk.X, padx=5, pady=(8, 4))
+
+    def push_all_params(self):
+        """Send every slider's current value to the firmware.
+
+        Needed because _on_slider only fires on user movement: without this, a
+        changed start_val is cosmetic and the robot keeps running whatever the
+        firmware was flashed with. Crouch is deliberately excluded -- it moves
+        the legs, and a bulk push should not reshape the stance.
+        """
+        if not (self.app.link and self.app.link.ser):
+            messagebox.showinfo("Not Connected", "Please connect to serial port first.")
+            return
+        for spec in PARAM_SPECS + RC_PARAM_SPECS:
+            if spec.key.startswith("crouchOffset"):
+                continue
+            self._on_slider(spec.key, self.sliders[spec.key].get_value())
+        # No explicit confirmation is printed here: the log pane is rebuilt from
+        # the link's raw buffer, and the firmware answers every one of these
+        # with its own "Updated ->" ack, which lands there anyway.
 
     def _toggle_auto_backup(self):
         if self.app.link:
@@ -379,6 +436,9 @@ class BalanceTunerTab(ttk.Frame):
         elif key == "maxSafeTilt": lk.set_tilt(val)
         elif key == "Ki_trim":     lk.set_trim_gain(val)
         elif key == "Kp_vel":      lk.set_vel_p(val)
+        elif key == "RC_MAX_STEER":  lk.set_rc_max_steer(val)
+        elif key == "RC_MAX_VEL":    lk.set_rc_max_vel(val)
+        elif key == "RC_STEER_EXPO": lk.set_rc_steer_expo(val)
         elif key == "crouchOffsetL":
             if self.crouch_mirror_var.get():
                 self.sliders["crouchOffsetR"].set_value(val)
@@ -397,7 +457,11 @@ class BalanceTunerTab(ttk.Frame):
         if not app.link:
             return
 
-        for spec in PARAM_SPECS:
+        # RC_PARAM_SPECS included so the RC sliders track what the firmware
+        # actually holds. RC_MAX_VEL/RC_MAX_STEER echo back via the RV/RS ack;
+        # RC_STEER_EXPO has no echo mapping, so fw.get returns None and it is
+        # skipped, leaving the slider showing the last value the user sent.
+        for spec in PARAM_SPECS + RC_PARAM_SPECS:
             val = app.link.fw.get(spec.key)
             if val is not None and spec.key in self.sliders:
                 self.sliders[spec.key].mark_echo_received(float(val))
