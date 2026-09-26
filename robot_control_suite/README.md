@@ -7,7 +7,8 @@ This directory contains the complete modular suite of firmware and graphical tun
 ## 📁 Ecosystem Subdirectory Matrix
 
 RC-capable variants sit directly under `robot_control_suite/`. Variants with
-**no** RC receiver wired in are grouped under **`wireless_no_rc/`**.
+**no** RC receiver wired in are grouped under **[`wireless_no_rc/`](wireless_no_rc/README.md)**
+(see that folder's own `README.md` for details).
 
 | Subdirectory Folder | IK Execution | Transport Medium | Baud Rate | FlySky iBUS RC | Primary Purpose |
 | :--- | :---: | :---: | :---: | :---: | :--- |
