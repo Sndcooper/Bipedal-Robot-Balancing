@@ -1,6 +1,6 @@
 ---
 name: flash-firmware
-description: Compiles and uploads the STM32 balancing bipedal robot firmware with PlatformIO — picking the correct tuner_legcontrol variant, its required build_flags (ENABLE_HWSERIALx / IBusBM / TX buffer), BOOT0 serial-bootloader setup, and COM-port handling.
+description: Compiles and uploads the STM32 balancing bipedal robot firmware with PlatformIO — picking the correct robot_control_suite variant, its required build_flags (ENABLE_HWSERIALx / IBusBM / TX buffer), BOOT0 serial-bootloader setup, and COM-port handling.
 ---
 
 # Flash & Upload STM32 Firmware (`flash-firmware`)
@@ -13,16 +13,26 @@ first identify **which variant** they mean (the repo has many — see
 ## 1. Pick the target directory
 
 Ask/confirm the variant if ambiguous. Current active firmwares live under
-`Balance_Rework/tuner_legcontrol/<variant>/firmware/`:
+`robot_control_suite/<variant>/firmware/`. RC-capable (remote-controlled)
+variants sit directly under `robot_control_suite/`; variants with **no** RC
+receiver are grouped under `robot_control_suite/wireless_no_rc/`:
 
-- `RC_mcu_IK_wireless/firmware` — flagship: RC + wireless + IK.
-- `mcu_ik_engine_wireless/firmware` — wireless GUI tuning (**most recently edited**).
-- `mcu_ik_engine_wired/firmware`, `mcu_ik_engine/firmware` — wired 500k tuning/reference.
-- `mcu_ik_engine_pretest_wireless/firmware` — radio latency benchmark.
-- `mcu_pos_wireless/firmware` — position tuner.
+- `rc_mcu_ik_wireless/firmware` — flagship: RC + wireless + IK.
+- `rc_balance_fusion_wireless/firmware` — RC + sensor-fusion balancer.
+- `wireless_no_rc/mcu_ik_engine_wireless/firmware` — wireless GUI tuning, no RC.
+- `wireless_no_rc/mcu_ik_engine_pretest_wireless/firmware` — radio latency benchmark, no RC.
+- `wireless_no_rc/mcu_balance_fusion_wireless/firmware` — sensor-fusion balancer (Stage 2), no RC per its own README (its `main.cpp` does decode iBUS — flag that discrepancy if it matters for the task).
+- `wireless_no_rc/mcu_pos_wireless/firmware` — position tuner, no RC.
+- `blue_pill_dev/*/firmware`, `black_pill_dev/*/firmware`, `ax12_control/firmware`
+  — newer variants added after this skill was last updated; `ls robot_control_suite/`
+  and that variant's own `README.md` are the source of truth, not this list.
 
-Older/legacy (only if explicitly requested): `Balance_Rework/firmware`,
-`PlatformIO_Firmware`.
+`mcu_ik_engine_wired`, `mcu_ik_engine`, and `pc_ik_engine` moved to `legacy/`
+(see below) — they are no longer under `robot_control_suite/`.
+
+Older/legacy (only if explicitly requested): `legacy/old_firmware/Balance_Rework_firmware`,
+`legacy/old_firmware/mcu_ik_engine_wired`, `legacy/old_firmware/mcu_ik_engine`, `legacy/old_firmware/pc_ik_engine`,
+`legacy/old_firmware/PlatformIO_Firmware`.
 
 > There is no single "the firmware" anymore. If the user just says "flash the
 > firmware," confirm the variant rather than defaulting silently.
@@ -47,7 +57,7 @@ build_flags =
 
 Extra requirements by variant:
 - **Wireless (`Serial3`) variants** need `-DENABLE_HWSERIAL3`.
-- **RC flagship (`RC_mcu_IK_wireless`)** additionally needs:
+- **RC flagship (`rc_mcu_ik_wireless`)** additionally needs:
   `-DENABLE_HWSERIAL1` (iBUS), `-DSERIAL_TX_BUFFER_SIZE=256` (extended telemetry
   frame > default 64 B), `lib_deps = IBusBM`, and a CMSIS pin
   `platform_packages = framework-cmsis @ <2.60000.0` (CMSIS 6.x breaks on
@@ -68,8 +78,8 @@ only if the user's `platformio.ini` is set up for it.)
 
 ```powershell
 pio device list                                         # find COM ports
-pio run -d "Balance_Rework/tuner_legcontrol/RC_mcu_IK_wireless/firmware"            # compile only
-pio run -d "Balance_Rework/tuner_legcontrol/RC_mcu_IK_wireless/firmware" -t upload # flash
+pio run -d "robot_control_suite/rc_mcu_ik_wireless/firmware"            # compile only
+pio run -d "robot_control_suite/rc_mcu_ik_wireless/firmware" -t upload # flash
 # target a specific port: append  --upload-port COM3
 ```
 

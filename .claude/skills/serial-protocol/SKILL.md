@@ -1,11 +1,11 @@
 ---
 name: serial-protocol
-description: The firmware↔GUI wire contract for the tuner_legcontrol variants — and the critical fact that the protocol DIFFERS per variant (comma/colon/newline vs space/pipe). Read before adding/changing any serial command, telemetry field, or serial_link.py parser.
+description: The firmware↔GUI wire contract for the robot_control_suite variants — and the critical fact that the protocol DIFFERS per variant (comma/colon/newline vs space/pipe). Read before adding/changing any serial command, telemetry field, or serial_link.py parser.
 ---
 
 # Serial Protocol & Firmware↔GUI Contract (`serial-protocol`)
 
-Every tuner_legcontrol variant is a **matched pair**: the firmware's
+Every robot_control_suite variant is a **matched pair**: the firmware's
 `parseCommand()` + telemetry TX in `firmware/src/main.cpp` must agree byte-for-byte
 with the GUI's `gui/serial_link.py` (`_process_line`, `_parse_telemetry`,
 `_parse_fw_update`, and the `_send(...)` methods). **Change one side, change the
@@ -16,7 +16,7 @@ other, in the same edit.** A mismatch fails silently — the GUI just shows zero
 Two families exist. Confirm which one you are in by reading that folder's files —
 do not assume.
 
-| | `mcu_ik_engine_wireless` (and siblings) | `RC_mcu_IK_wireless` (flagship) |
+| | `mcu_ik_engine_wireless` (and siblings) | `rc_mcu_ik_wireless` (flagship) |
 |---|---|---|
 | Frame terminator | `\n` (`Serial3.println`) | `|` pipe (also accepts `\n`) |
 | Telemetry style | `key:value`, comma-separated | `key<value>`, space-separated |
@@ -51,7 +51,7 @@ never collide with `S`/`P`/`T`. Order in `parseCommand()` matters — keep prefi
 | `M` | Toggle motors (arm/disarm) | `Motors ENABLED/DISABLED` |
 
 > \* **Known gap:** the `O` (offset) handler exists in `mcu_ik_engine_wireless`
-> (added, "newly implemented") but is **absent from `RC_mcu_IK_wireless`'s
+> (added, "newly implemented") but is **absent from `rc_mcu_ik_wireless`'s
 > `parseCommand()`** — so the flagship GUI's "Set Offset" is a silent no-op. If
 > you touch offset behaviour, reconcile both. (Flag to user before "fixing" the
 > flagship — see the findings the maintainer confirmed.)

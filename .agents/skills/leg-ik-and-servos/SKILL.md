@@ -10,8 +10,8 @@ servos on a shared half-duplex bus (`Serial2`, 1,000,000 baud). Geometry constan
 are shared between the Python twin (`gui/twin_kinematics.py`) and the C++ firmware
 (`solve_ik`, `map_angle_to_ax12` in `main.cpp`) — **keep them in sync**.
 
-Authoritative refs: `Robot_Specification.md` (geometry, calibration),
-`AX12_Control_Table_Mapping.md` (register/buffer offsets).
+Authoritative refs: `docs/Robot_Specification.md` (geometry, calibration),
+`docs/AX12_Control_Table_Mapping.md` (register/buffer offsets).
 
 ## The half-duplex bus (the "hack")
 
@@ -34,7 +34,7 @@ Authoritative refs: `Robot_Specification.md` (geometry, calibration),
 // READ:        FF FF ID 04 02 ADDR LEN CHK
 ```
 Health poll reads **addr 40 len 4** → Present Load (2B) + Voltage (1B) + Temp (1B).
-`loadPct = (loadRaw & 0x3FF)/1023*100`. See `AX12_Control_Table_Mapping.md` for the
+`loadPct = (loadRaw & 0x3FF)/1023*100`. See `docs/AX12_Control_Table_Mapping.md` for the
 full table and the `buf[5+addr]` offset rule.
 
 ## Servo init & polling
@@ -84,7 +84,7 @@ If you add a third leg pose or change mounting, this is the line to revisit.
 
 AX-12 compliance margin/slope (`CMP id margin slope`, regs 26–29) is a **coarse
 mechanical-spring** setting, not a fast position command. The roadmap
-(`go-throuugh-all-the-golden-sketch.md`, Phase C) intends a low-rate `RIGID`/
+(`docs/Project_History_and_Roadmap.md`, Phase C) intends a low-rate `RIGID`/
 `COMPLIANT` state machine that loosens slope on disturbance — not yet implemented.
 Today compliance is just the static value set at init. Treat legs as the slow,
 secondary shock-absorbing layer; wheels remain the primary balance actuator.

@@ -1,11 +1,11 @@
 ---
 name: firmware-control-loop
-description: How the STM32 100 Hz balance firmware works — the 3-layer cascaded PID (position→velocity→balance), IMU complementary filter, safety cutoff, encoder velocity, and the strict loop-timing budget. Read before changing balancing, safety, motor, or IMU code in any tuner_legcontrol variant.
+description: How the STM32 100 Hz balance firmware works — the 3-layer cascaded PID (position→velocity→balance), IMU complementary filter, safety cutoff, encoder velocity, and the strict loop-timing budget. Read before changing balancing, safety, motor, or IMU code in any robot_control_suite variant.
 ---
 
 # Firmware Control Loop (`firmware-control-loop`)
 
-Applies to the MCU firmwares in `Balance_Rework/tuner_legcontrol/*/firmware/src/main.cpp`.
+Applies to the MCU firmwares in `robot_control_suite/*/firmware/src/main.cpp`.
 **Pin yourself to one variant** (see `robot-overview`) — this skill describes the
 shared architecture, but exact defaults/format live in that variant's `main.cpp`.
 
@@ -115,14 +115,14 @@ that ±100 c/s noise is amplified straight into `tilt_bias`. `vel_alpha≈0.85` 
 ## Tuning workflow (physical, incremental, reversible)
 
 1. Flash the variant, **verify `GYRO_PITCH_SIGN`** with motors off.
-2. Suspend the robot in a harness (see `Balance_Rework/README.md` §2). Clear the swing path.
+2. Suspend the robot in a harness (see `legacy/old_firmware/Balance_Rework_README.md` §2). Clear the swing path.
 3. Live-tune over serial/GUI — start with inner loop (`P`,`I`,`D`), then velocity
    (`VP`,`VI`,`VA`), then position (`PP`). Watch `TB` (tilt bias) and `ST` (cascade state).
 4. Commit good gains into `main.cpp` defaults and re-flash. `git commit` after each
    change so a worse gain set can be rolled back — there is no unit test here;
    validation is physical.
 
-The `Balance_Rework/autotuner/` tool automates step 3 but targets the **older
-`Balance_Rework/firmware` colon-telemetry protocol** (`PITCH:`,`PID_OUT:`), not
-the tuner_legcontrol frames — confirm protocol compatibility before pointing it
-at a tuner_legcontrol variant.
+The `legacy/testing/autotuner/` tool automates step 3 but targets the **older
+`legacy/old_firmware/Balance_Rework_firmware` colon-telemetry protocol** (`PITCH:`,`PID_OUT:`), not
+the robot_control_suite frames — confirm protocol compatibility before pointing it
+at a robot_control_suite variant.
