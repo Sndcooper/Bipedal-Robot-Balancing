@@ -8,3 +8,8 @@ __pycache__/
 .venv/
 venv/
 .vscode/
+
+# stray tool binaries
+*.exe
+# GUI tuning profiles are per-robot
+profiles/

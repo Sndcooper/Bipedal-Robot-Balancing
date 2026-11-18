@@ -10,8 +10,12 @@ RC-capable variants sit directly under `robot_control_suite/`. Variants with
 **no** RC receiver wired in are grouped under **[`wireless_no_rc/`](wireless_no_rc/README.md)**
 (see that folder's own `README.md` for details).
 
+> ⭐ **The robot currently runs [`rcbfw/`](rcbfw/README.md)** (balance fusion + RC, key:value/`\n` protocol, RC map Ch3–Ch10).
+> Start there. Everything below is a sibling or an earlier stage.
+
 | Subdirectory Folder | IK Execution | Transport Medium | Baud Rate | FlySky iBUS RC | Primary Purpose |
 | :--- | :---: | :---: | :---: | :---: | :--- |
+| **[`rcbfw`](rcbfw/README.md)** ⭐ | **MCU (STM32)** | Wireless (3DR) | 115,200 | **Enabled** (Ch3–Ch10) | **Main, working build.** Cascaded balance + RC drive/steer/crouch + AX-12 legs + 3-tab GUI. |
 | **[`rc_mcu_ik_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/robot_control_suite/rc_mcu_ik_wireless)** | **MCU (STM32)** | Wireless (3DR) | 115,200 | **Enabled** (FS-iA10B) | **Full Autonomous & RC Untethered Balancing.** Features full remote control, live telemetry, dynamic lean/gimbal, and non-blocking iBUS input. |
 | **[`rc_balance_fusion_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/robot_control_suite/rc_balance_fusion_wireless)** | **MCU (STM32)** | Wireless (3DR) | 115,200 | **Enabled** (FS-iA10B) | `mcu_balance_fusion_wireless` with a FlySky transmitter added — see its own `README.md`. |
 | **[`wireless_no_rc/mcu_ik_engine_wireless`](file:///c:/Users/vilas/Documents/PlatformIO/Projects/self%20balancing%20Bipedal%20robot/Balancing_Bipedal_Firmware_and_Scripts/robot_control_suite/wireless_no_rc/mcu_ik_engine_wireless)** | **MCU (STM32)** | Wireless (3DR) | 115,200 | Disabled | **Wireless Telemetry & GUI Tuning.** Untethered balance tuning with real-time GUI telemetry plotting over 3DR radio. |

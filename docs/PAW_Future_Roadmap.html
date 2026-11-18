@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PAW — Analysis, Novelty & Research Roadmap</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#30363d;
+    --txt:#e6edf3; --mut:#9da7b3; --acc:#ff9f43; --acc2:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --vio:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--txt)}
+  a{color:var(--acc2);text-decoration:none} a:hover{text-decoration:underline}
+  header{padding:48px 24px 32px;text-align:center;background:radial-gradient(ellipse at top,#2a1d0e 0%,var(--bg) 70%);border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:2.4rem;letter-spacing:.5px}
+  header h1 span{color:var(--acc)}
+  header p{color:var(--mut);max-width:820px;margin:10px auto 0}
+  nav{position:sticky;top:0;z-index:5;background:#0d1117ee;backdrop-filter:blur(6px);border-bottom:1px solid var(--line);
+      display:flex;flex-wrap:wrap;gap:4px 18px;justify-content:center;padding:10px}
+  nav a{color:var(--mut);font-size:.9rem} nav a:hover{color:var(--acc)}
+  main{max-width:1180px;margin:0 auto;padding:24px}
+  section{margin:40px 0}
+  h2{font-size:1.5rem;border-left:4px solid var(--acc);padding-left:12px;margin-bottom:6px}
+  h2 small{color:var(--mut);font-weight:400;font-size:.9rem;margin-left:8px}
+  h3{margin:0 0 6px;font-size:1.05rem}
+  .lead{color:var(--mut);margin-top:0}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .card p,.card li{color:#c9d1d9;font-size:.93rem}
+  .card ul{padding-left:18px;margin:6px 0}
+  .kpi{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+  .kpi div{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px;text-align:center}
+  .kpi b{display:block;font-size:1.6rem;color:var(--acc)}
+  .kpi span{color:var(--mut);font-size:.82rem}
+  .tag{display:inline-block;font-size:.72rem;padding:2px 8px;border-radius:999px;margin:0 4px 4px 0;border:1px solid var(--line);color:var(--mut)}
+  .t-ok{color:var(--ok);border-color:#238636} .t-warn{color:var(--warn);border-color:#9e6a03}
+  .t-bad{color:var(--bad);border-color:#8e1519} .t-vio{color:var(--vio);border-color:#6e40c9} .t-blue{color:var(--acc2);border-color:#1f6feb}
+  table{width:100%;border-collapse:collapse;font-size:.9rem;background:var(--panel);border-radius:10px;overflow:hidden}
+  th,td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--mut);font-weight:600}
+  code{background:#2d333b;padding:1px 6px;border-radius:5px;font-size:.85em}
+  pre{background:#010409;border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;font-size:.85rem}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;justify-content:center;margin:14px 0}
+  .flow .n{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:.85rem}
+  .flow .n.hot{border-color:var(--acc);color:var(--acc)}
+  .flow .ar{color:var(--mut)}
+  .timeline{border-left:2px solid var(--line);margin-left:10px;padding-left:22px}
+  .ph{position:relative;margin-bottom:22px}
+  .ph::before{content:"";position:absolute;left:-30px;top:6px;width:14px;height:14px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 4px #ff9f4333}
+  .ph h3 span{color:var(--mut);font-weight:400;font-size:.85rem}
+  .paper{border-left:3px solid var(--vio)}
+  .paper .venue{color:var(--vio);font-size:.82rem}
+  .note{background:#1f1a0f;border:1px solid #9e6a03;border-radius:10px;padding:12px 16px;color:#e3c27a;font-size:.9rem}
+  footer{color:var(--mut);text-align:center;padding:30px;border-top:1px solid var(--line);font-size:.85rem}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🐾 <span>PAW</span> — Analysis, Novelty &amp; Research Roadmap</h1>
+  <p>A wheel-legged self-balancing robot: STM32F103 Blue Pill, 4× Dynamixel AX-12+ driving two 5-bar legs, two JGA12V encoder motors,
+     MPU6050, 3DR telemetry, and FlySky iBUS. This page covers where the <code>rcbfw</code> firmware and GUI stand today, what the logs show,
+     how to fix the servo and jerkiness bottlenecks, and which research directions could become papers.</p>
+</header>
+
+<nav>
+  <a href="#today">Today</a><a href="#arch">Architecture</a><a href="#novel">What's novel</a><a href="#evidence">Log evidence</a>
+  <a href="#quick">Quick wins</a><a href="#servo">Servo &amp; jerk</a><a href="#features">New features</a>
+  <a href="#papers">Paper topics</a><a href="#plan">Roadmap</a><a href="#links">Links</a>
+</nav>
+
+<main>
+
+<!-- ============================================================ -->
+<section id="today">
+  <h2>Where the robot stands today <small>measured from <code>rcbfw/gui/logs</code>, 21 sessions</small></h2>
+  <p class="lead">These numbers come from the GUI's automatic session logs recorded on 2026-09-19. Telemetry runs at 10 Hz, so anything faster than 5 Hz is aliased or invisible.</p>
+  <div class="kpi">
+    <div><b>15.9 min</b><span>armed run time analysed (9 556 frames)</span></div>
+    <div><b>1.88°</b><span>pitch std-dev while armed (p95 |pitch| 3.7°)</span></div>
+    <div><b>~50%</b><span>of frames with the pitch integrator pinned at its ±64 PWM clamp</span></div>
+    <div><b>0.59 /s</b><span>rail-to-rail integrator flips, so it behaves like a relay</span></div>
+    <div><b>4–6 s</b><span>dominant wheel-velocity wobble period (ACF)</span></div>
+    <div><b>298 c/s</b><span>velocity std-dev at zero command (drift noise floor)</span></div>
+    <div><b>8</b><span>tilt safety cutoffs across the sessions</span></div>
+    <div><b>255</b><span>max AX-12 no-reply count: whole-bus dropouts in several sessions</span></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="arch">
+  <h2>How the control stack works <small><code>robot_control_suite/rcbfw/firmware/src/main.cpp</code></small></h2>
+  <div class="flow">
+    <div class="n">Ch3 drive stick</div><div class="ar">→</div>
+    <div class="n">expo + slew limit<br><small>1200 c/s²</small></div><div class="ar">→</div>
+    <div class="n hot">Outer loop<br><small>velocity → lean (P + gated I)</small></div><div class="ar">→</div>
+    <div class="n">targetAngle + lean_cmd<br><small>clamped ±12°</small></div><div class="ar">→</div>
+    <div class="n hot">Inner PID @100 Hz<br><small>Kp 78 · Ki 650 · Kd 3.52</small></div><div class="ar">→</div>
+    <div class="n">± steer (post-PID, cubic expo)</div><div class="ar">→</div>
+    <div class="n">L298N PWM</div>
+  </div>
+  <div class="flow">
+    <div class="n">MPU6050 (I²C)</div><div class="ar">→</div><div class="n">complementary filter α 0.96</div>
+    <div class="ar">·</div>
+    <div class="n">encoders (1× decoding)</div><div class="ar">→</div><div class="n">EMA α 0.85: velocity (sum) + yaw (difference)</div>
+    <div class="ar">·</div>
+    <div class="n">5-bar IK → SYNC_WRITE → 4× AX-12</div>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>⚖️ Balance</h3><ul>
+      <li>Derivative on measurement (<code>-gyroRate</code>), so setpoint steps cause no D kick.</li>
+      <li>The integrator <em>state</em> is clamped to 64 PWM, not just the output.</li>
+      <li>Tilt cutoff at 25° latches until re-armed.</li></ul></div>
+    <div class="card"><h3>🔁 Velocity cascade</h3><ul>
+      <li>A drive command becomes a <em>lean angle</em>, never a PWM. There is a single authority over the setpoint.</li>
+      <li>Trim integrator learns only when standing (|v err| &lt; 250 c/s, no stick input).</li>
+      <li>The velocity setpoint is slew-limited, so releasing the stick decelerates instead of lurching.</li></ul></div>
+    <div class="card"><h3>🎮 RC layer</h3><ul>
+      <li><code>IBUSBM_NOTIMER</code>: no TIM1 ISR. A cooperative drain with a 400 µs budget, polled every 10 ms.</li>
+      <li>Per-channel centre and switch idle state captured at boot, plus a 3-poll debounce.</li>
+      <li>Arm interlock, 500 ms link-loss failsafe, and Ch7 always works as a kill switch.</li></ul></div>
+    <div class="card"><h3>🦿 Legs</h3><ul>
+      <li>2-circle IK on the MCU, calibrated 818/441 counts, mirrored leg 2.</li>
+      <li>Rule of one Serial2 transaction per tick: move, settings, or hold/poll.</li>
+      <li>Settings are pushed one servo per tick via a dirty-mask. The health poll is non-blocking and reads the ERROR byte.</li>
+      <li>After a limp, re-grip reads present position and re-seeds the foot with FK, so the legs don't snap.</li></ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="novel">
+  <h2>What's genuinely novel here <small>and what is good engineering rather than novelty</small></h2>
+  <table>
+    <tr><th>Idea in the code</th><th>Assessment</th></tr>
+    <tr><td><b>A 5-bar parallel leg on a wheel, driven by ~$45 serial-bus servos</b>, with a variable-height wheeled inverted pendulum balanced on a 72 MHz Cortex-M3 with no FPU.</td>
+        <td><span class="tag t-vio">publishable platform angle</span> Comparable robots (Ascento, Upkie, Diablo, Tron1) use BLDC or QDD actuators that cost 10–50× more. Being this cheap and low-bandwidth is the research hook.</td></tr>
+    <tr><td><b>Learn-band-gated trim integrator</b>: the outer I-term learns the CoM offset only near steady state and freezes while driving or braking.</td>
+        <td><span class="tag t-ok">nice, practical</span> A form of conditional integration. It is well-motivated by the logs but known in the anti-windup literature.</td></tr>
+    <tr><td><b>Rule of one bus transaction per tick</b> on a half-duplex bus built from a 10 kΩ resistor, with byte-counted echo rejection.</td>
+        <td><span class="tag t-ok">solid real-time design</span> Engineering, not a research contribution. The divergence below shows it is easy to break.</td></tr>
+    <tr><td><b>Boot-captured switch idle state and debounce</b>: a two-position switch has no neutral, so its resting position is defined as idle.</td>
+        <td><span class="tag t-ok">clever safety detail</span> Worth documenting and not novel. The logs showed Ch8 resting 109 µs off-centre, which is what drove the design.</td></tr>
+    <tr><td><b>Cooperative, budgeted iBUS drain</b> instead of the library's 1 ms ISR that contains <code>delayMicroseconds(100)</code>.</td>
+        <td><span class="tag t-ok">correct call</span> The ISR in the library was verified (<code>IBusBM.cpp:213</code>).</td></tr>
+    <tr><td><b>Log-evidence-driven tuning culture</b>: every constant in <code>main.cpp</code> cites the session log that justified it.</td>
+        <td><span class="tag t-blue">strong basis for a dataset</span> Structured, these logs become a real-robot dataset for learning-based papers.</td></tr>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<section id="evidence">
+  <h2>Findings that should change the code <small>ordered by impact</small></h2>
+  <div class="grid">
+    <div class="card"><span class="tag t-bad">high</span><h3>1 · The inner-loop Ki acts as a relay</h3>
+      <p>With Ki = 650 the integral saturates at ±0.0985 (64 PWM) in about half of all armed frames and flips between rails about 0.6 times per second. That is a ±64 PWM square wave feeding the motors, which matches the slow 4–6 s wobble and the idle drift.</p>
+      <p><b>Fix:</b> drop the inner-loop Ki to about 100–250, or remove it and let the outer trim loop own the offset (PD inner, PI outer is the textbook split). Add a small leak.</p></div>
+    <div class="card"><span class="tag t-bad">high</span><h3>2 · Two "main" firmwares have diverged</h3>
+      <p><code>rcbfw</code> was forked from <code>rc_balance_fusion_wireless</code> at commit <code>16ef5ba</code>. After the fork, rbfw gained the <b>D-term low-pass</b>, the <b>SAT</b> telemetry field and the <b>crouchDirty</b> bus fix. rcbfw gained the <b>velocity slew</b>, <b>drive expo</b>, <b>trim learn band</b> and the <b>poll flush</b> fix. Neither variant has all of them.</p>
+      <p><b>Fix:</b> merge both into one firmware. The rcbfw RC-crouch path still calls <code>ax12SyncWriteGoals()</code> from <code>readRC()</code>, which is a second bus transaction per tick. That is exactly the bug rbfw documented as killing the bus.</p></div>
+    <div class="card"><span class="tag t-bad">high</span><h3>3 · Whole-bus AX-12 dropouts</h3>
+      <p>In 6 sessions all four servos stopped replying within about 4 s of arming (the 1 s stagger is just the SRV report round-robin). A single bad servo would not do this. The likely causes are bus desync or a supply sag under motor current, not individual servo faults.</p>
+      <p><b>Fix:</b> the merged arbiter, a native single-wire half-duplex USART, logging of servo voltage (addr 42), and a separate servo supply or bulk capacitance.</p></div>
+    <div class="card"><span class="tag t-warn">medium</span><h3>4 · IMU is under-configured</h3>
+      <ul><li><code>Wire.setClock()</code> is never called, so I²C runs at 100 kHz. That costs about 1.3–1.5 ms, or 13–15% of every tick (the docs claim 400 kHz).</li>
+      <li>The MPU6050 DLPF (reg 0x1A) is never set, so the gyro runs at about 256 Hz bandwidth and motor/servo vibration goes straight into the D-term.</li>
+      <li>There is no gyro bias calibration; <code>C</code> only zeroes the accelerometer.</li>
+      <li>rcbfw has <b>no</b> D-term filter (rbfw has <code>DF</code>).</li></ul></div>
+    <div class="card"><span class="tag t-warn">medium</span><h3>5 · Coarse velocity measurement</h3>
+      <p>Encoders are decoded on RISING edges of channel A only (1×). At 100 Hz one count is 100 c/s of quantisation, which is why the EMA is so heavy (≈2.6 Hz corner, not the "15 Hz" the skill doc claims).</p>
+      <p><b>Fix:</b> use CHANGE interrupts on A and B for 4× decoding, or TIM3 encoder mode on PA6/PA7. Then estimate velocity from time between edges or with a small Kalman filter.</p></div>
+    <div class="card"><span class="tag t-warn">medium</span><h3>6 · Actuation non-idealities</h3>
+      <p>The L298N (~2 V bipolar drop) runs at STM32duino's default ~1 kHz <code>analogWrite</code> with no deadband compensation. The median |PID_OUT| is 72 PWM, so a real share of the command range goes into the driver's deadzone.</p>
+      <p><b>Fix:</b> use a TB6612FNG or DRV8871-class driver, 10–20 kHz PWM, and a measured friction and deadband feed-forward.</p></div>
+    <div class="card"><span class="tag t-blue">low</span><h3>7 · Observability</h3>
+      <p>At 10 Hz, telemetry cannot see jitter. The PITCH line is about 350 B.</p>
+      <p><b>Fix:</b> a compact binary frame (about 24 B) at 50 Hz, plus an on-board RAM ring buffer that is dumped after a cutoff (a "black box").</p></div>
+    <div class="card"><span class="tag t-blue">low</span><h3>8 · No persistence</h3>
+      <p>A brownout reset silently restores the compiled gains while the GUI keeps showing stale sliders.</p>
+      <p><b>Fix:</b> store gains and calibration in flash (EEPROM emulation), and send a boot-count and reset-reason line.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="quick">
+  <h2>Quick wins <small>about a week, all firmware-only</small></h2>
+  <table>
+    <tr><th>#</th><th>Change</th><th>Why</th><th>Effort</th></tr>
+    <tr><td>1</td><td>Merge rcbfw and rbfw into one firmware. Keep <code>crouchDirty</code>, the D-filter, SAT, slew, drive expo, the learn band and the poll flush.</td><td>Removes the bus-killing double transaction and ends the fork</td><td>½ day</td></tr>
+    <tr><td>2</td><td><code>Wire.setClock(400000)</code>, DLPF reg 0x1A = 3 (~44 Hz), gyro bias averaged at calibration time</td><td>Frees about 1 ms per tick and gives a cleaner D-term</td><td>1 h</td></tr>
+    <tr><td>3</td><td>Inner-loop Ki to 150–250 (or 0 with outer trim), plus an integrator leak</td><td>Stops the ±64 PWM relay and the slow wobble</td><td>bench session</td></tr>
+    <tr><td>4</td><td>4× encoder decoding (CHANGE on A and B)</td><td>4× velocity resolution, so the EMA can be lighter and less laggy</td><td>1 h</td></tr>
+    <tr><td>5</td><td><code>analogWriteFrequency(15000)</code> and deadband feed-forward</td><td>Quieter, more linear torque near zero</td><td>2 h</td></tr>
+    <tr><td>6</td><td>Flash-persisted parameters and a reset-reason report</td><td>No more "the gains silently changed" episodes</td><td>½ day</td></tr>
+    <tr><td>7</td><td>Binary 50 Hz telemetry and a post-cutoff black-box dump</td><td>Makes jitter measurable and supplies the data needed for ML</td><td>1 day</td></tr>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<section id="servo">
+  <h2>Servo bottleneck &amp; jerkiness <small>the AX-12 is the weak link, so work around it</small></h2>
+  <p class="lead">AX-12+: 1 Mbps half-duplex, 0.29° resolution, an internal P-only controller shaped by compliance margin and slope, 1.5 N·m stall torque, and no velocity profile of its own unless you set Moving Speed.</p>
+  <div class="grid">
+    <div class="card"><h3>🧵 Synchronised velocity profiling</h3>
+      <p>For each move, SYNC_WRITE goal <em>and</em> Moving Speed (addr 30–33, 4 bytes per servo) with each servo's speed proportional to its travel. All four joints then arrive together and the servo's own profile does the smoothing, instead of sending 10 Hz goal steps.</p></div>
+    <div class="card"><h3>📈 Minimum-jerk trajectories</h3>
+      <p>Replace the cubic smoothstep (acceleration jumps at start and end) with the quintic <code>10s³−15s⁴+6s⁵</code>, which has zero velocity and zero acceleration at both ends. Stream at 50 Hz during moves. At 1 Mbps a 20-byte SYNC_WRITE is about 0.2 ms.</p></div>
+    <div class="card"><h3>🎚️ Setpoint filter on RC crouch</h3>
+      <p>Pass the rate-integrated crouch target through a critically damped second-order filter (ωn about 8 rad/s) before IK. You get smooth arrival with no restart problem, which is the fix the code comments already point to.</p></div>
+    <div class="card"><h3>🧲 Compliance gain scheduling</h3>
+      <p>Posing: slope 4, margin 1 (stiff). Balancing on the ground: slope 32–64, which makes the legs act as passive suspension that soaks up wheel impacts before they reach the IMU. Switch automatically when the robot arms. This is the "Phase C" item from the old roadmap.</p></div>
+    <div class="card"><h3>🔌 Native half-duplex UART</h3>
+      <p>The STM32 USART supports single-wire half-duplex (HDSEL). In STM32duino this is <code>HardwareSerial Serial2(PA2)</code> with a single pin. It removes the 10 kΩ hack and the echo accounting. A 74LVC2G241 tri-state buffer is the other option. Either way the echo-drain parser needs updating to match.</p></div>
+    <div class="card"><h3>📏 Feed-forward pitch compensation</h3>
+      <p>Crouching moves the CoM and changes the pendulum length. Use the IK foot positions to feed forward a <code>targetAngle</code> correction and schedule Kp/Kd with body height (a simple lookup table). Today a crouch shows up as a disturbance the PID has to reject.</p></div>
+    <div class="card"><h3>⚡ Power isolation</h3>
+      <p>Put the servo rail on its own regulator or LiPo tap with 1000 µF or more of bulk capacitance, and log AX-12 voltage (addr 42). Motor stalls sagging the shared rail is the most likely cause of the whole-bus dropouts and resets.</p></div>
+    <div class="card"><h3>🔁 Upgrade path</h3>
+      <p>For dynamic leg use (active suspension, jumping) the AX-12 is too slow and weak. Dynamixel XL430 or XC330 (Protocol 2.0, current and velocity modes, 4 Mbps) are a drop-in class upgrade. Small QDD BLDC actuators are the long-term option.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="features">
+  <h2>Features that would lift performance</h2>
+  <div class="grid">
+    <div class="card"><span class="tag t-vio">control</span><h3>LQR / state-feedback balance</h3>
+      <p>The state is [pitch, pitch-rate, wheel position, wheel velocity]. Identify the model from logs, compute a gain K per leg height, and interpolate between them. It replaces three hand-tuned loops with one principled controller and gives a clean baseline for papers.</p></div>
+    <div class="card"><span class="tag t-vio">estimation</span><h3>Kalman / Mahony pitch plus gyro-bias estimation</h3>
+      <p>Fuse accelerometer, gyro and wheel odometry (the base-acceleration term corrupts the accelerometer when driving). Estimate gyro bias online, and detect slip from the disagreement between encoder and IMU.</p></div>
+    <div class="card"><span class="tag t-vio">legs</span><h3>Roll balance and leaning into turns</h3>
+      <p>Differential leg height from IMU roll lets the robot level itself on slopes and lean into turns for higher yaw rates without tipping, as Ascento does. The hardware already allows this.</p></div>
+    <div class="card"><span class="tag t-vio">legs</span><h3>Step-up / curb climb</h3>
+      <p>Crouch, drive the wheel against the edge, extend. This is feasible with AX-12s at low speed and makes a strong demo video.</p></div>
+    <div class="card"><span class="tag t-blue">autonomy</span><h3>Heading hold and odometry</h3>
+      <p>Integrate yaw from the encoder difference, fuse it with gyro Z, and close a heading loop (the code notes this is missing). Add a waypoint mode from the GUI.</p></div>
+    <div class="card"><span class="tag t-blue">tooling</span><h3>MuJoCo digital twin</h3>
+      <p>Build an MJCF model of PAW with the real mass numbers from <code>Robot_Specification.md</code>, AX-12 latency and quantisation, and L298N deadband. It enables sim-to-real, controller regression tests, and RL.</p></div>
+    <div class="card"><span class="tag t-blue">tooling</span><h3>Safe auto-tuner (Bayesian optimisation)</h3>
+      <p>Revive <code>legacy/testing/autotuner</code> against the current protocol. Use SafeOpt or a constrained BO over (Kp, Kd, Kp_vel, Ki_trim) with the cutoff as the safety constraint.</p></div>
+    <div class="card"><span class="tag t-blue">compute</span><h3>Companion computer</h3>
+      <p>Add an ESP32-S3 or Raspberry Pi Zero 2 W over UART to run learned policies or vision (line following, person following), while the Blue Pill stays the hard-real-time safety layer.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="papers">
+  <h2>Paper topics <small>ICRA · IROS · CoRL · RSS · Humanoids · RA-L</small></h2>
+  <div class="note">No topic guarantees acceptance. What gets accepted at these venues is: (1) a clear claim, (2) comparison against strong baselines (LQR, a tuned PID, prior work), (3) real-hardware experiments with statistics over many trials, and (4) ideally open-sourced code, CAD and data. The low-cost, low-bandwidth nature of PAW is the angle that sets it apart, so lean into it. Check each venue's call for papers for current deadlines and page limits.</div>
+  <div class="grid" style="margin-top:14px">
+    <div class="card paper"><div class="venue">CoRL · ICRA · RA-L</div><h3>A · Actuator-aware sim-to-real RL for wheel-legged robots with cheap serial-bus servos</h3>
+      <p><b>Claim:</b> modelling bus latency, 0.29° quantisation, compliance-slope dynamics and driver deadband (an "actuator network", as in Hwangbo et al. 2019) is what makes an RL policy transfer on a $300 robot.</p>
+      <p><b>Experiments:</b> policy with and without the actuator model; against LQR and PID on push recovery, velocity tracking and crouch-while-balancing.</p></div>
+    <div class="card paper"><div class="venue">ICRA · IROS</div><h3>B · Residual RL on top of a cascaded PID for safe on-robot learning</h3>
+      <p><b>Claim:</b> a small residual policy (running on a companion MCU) on top of the existing cascade learns on hardware within minutes without falling, while the PID guarantees a stable fallback.</p>
+      <p><b>Experiments:</b> falls per training hour, disturbance rejection before and after, comparison with learning from scratch in simulation.</p></div>
+    <div class="card paper"><div class="venue">IROS · Humanoids · RA-L</div><h3>C · Height-scheduled control of a variable-height wheeled inverted pendulum with 5-bar legs</h3>
+      <p><b>Claim:</b> LPV or gain-scheduled LQR over leg height, with CoM feed-forward from IK, keeps performance uniform across a 40 mm crouch range where a fixed-gain controller degrades.</p>
+      <p><b>Experiments:</b> pitch RMS and recovery time at 5 heights, during dynamic crouching, and on stairs or curbs.</p></div>
+    <div class="card paper"><div class="venue">ICRA · IROS</div><h3>D · Learned variable impedance for position-controlled servos</h3>
+      <p><b>Claim:</b> scheduling AX-12 compliance margin and slope online (learned, or from a disturbance estimator) gives passive suspension that measurably reduces pitch disturbance from terrain, without torque-controlled actuators.</p>
+      <p><b>Experiments:</b> bumps, drops and gravel. Compare stiff, soft, and learned scheduling; measure IMU vibration and pitch spikes.</p></div>
+    <div class="card paper"><div class="venue">ICRA · CASE · RA-L</div><h3>E · Safe Bayesian optimisation of balance gains from minutes of hardware data</h3>
+      <p><b>Claim:</b> SafeOpt or constrained BO with the tilt-cutoff as a safety constraint finds better gains than expert hand-tuning within N trials and never trips the cutoff.</p>
+      <p><b>Asset:</b> the existing log pipeline and auto-backup already produce the data.</p></div>
+    <div class="card paper"><div class="venue">IROS · RA-L · Sensors</div><h3>F · Learned proprioceptive state estimation on a microcontroller</h3>
+      <p><b>Claim:</b> a tiny network or Kalman filter hybrid (running on the MCU through TinyML) fusing IMU, wheel encoders and servo present-position/load estimates pitch, CoM shift and wheel slip better than a complementary filter.</p>
+      <p><b>Experiments:</b> motion-capture or camera ground truth; accuracy against compute cost on a Cortex-M.</p></div>
+    <div class="card paper"><div class="venue">ICRA · HardwareX · IEEE RAM</div><h3>G · PAW: an open, sub-$300 wheel-legged research platform</h3>
+      <p><b>Claim:</b> a reproducible platform with CAD, firmware, a MuJoCo twin and a dataset, benchmarked against published wheel-legged robots on cost, bandwidth and capabilities. Platform papers get cited if others can actually build the robot.</p></div>
+    <div class="card paper"><div class="venue">CoRL · ICRA (LLM track)</div><h3>H · Language-to-skill on a low-cost wheel-legged robot</h3>
+      <p><b>Claim:</b> an LLM or VLM on the companion computer composes parametrised skills (drive, crouch, lean, climb) with a safety monitor on the MCU. The contribution must be in the safety-constrained grounding, not the demo itself.</p></div>
+  </div>
+  <p class="lead" style="margin-top:14px"><b>Strongest bets for a first paper:</b> <b>C</b> (height-scheduled control) and <b>E</b> (safe BO) are achievable with the current hardware and a MuJoCo model. <b>A</b> and <b>B</b> have the most impact but need the simulation twin and better telemetry first.</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="plan">
+  <h2>Roadmap</h2>
+  <div class="timeline">
+    <div class="ph"><h3>Phase 0 — Consolidate <span>(week 1)</span></h3>
+      <p>Merge rcbfw and rbfw. Apply the IMU, Ki, encoder and PWM quick wins. Add flash-persisted parameters. Add a CI build (<code>pio run</code>) for the main firmware. Archive the superseded variants under <code>legacy/</code>.</p></div>
+    <div class="ph"><h3>Phase 1 — Smooth &amp; observable <span>(weeks 2–3)</span></h3>
+      <p>Minimum-jerk trajectories, synchronised Moving Speed, crouch setpoint filter, compliance scheduling. Binary 50 Hz telemetry and black box. Servo power isolation. <b>Metric:</b> zero bus dropouts, crouch without a pitch spike above 2°.</p></div>
+    <div class="ph"><h3>Phase 2 — Model-based <span>(weeks 4–6)</span></h3>
+      <p>System identification from logs, then a MuJoCo twin, then LQR per height with CoM feed-forward. Add a Kalman estimator and heading hold. <b>Metric:</b> pitch σ below 0.8° free-standing, push recovery with less than 10 cm drift.</p></div>
+    <div class="ph"><h3>Phase 3 — Legs as actuators <span>(weeks 7–9)</span></h3>
+      <p>Roll balance, leaning into turns, step-up climbing. Consider the XL430 upgrade.</p></div>
+    <div class="ph"><h3>Phase 4 — Learning &amp; papers <span>(weeks 10+)</span></h3>
+      <p>Safe BO tuner (paper E), height-scheduled control (paper C), then a companion computer with residual or sim-to-real RL (papers A and B). Open-source release (paper G).</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="links">
+  <h2>Links &amp; further reading</h2>
+  <div class="grid">
+    <div class="card"><h3>Comparable robots</h3><ul>
+      <li><a href="https://github.com/upkie/upkie">Upkie</a>: open-source wheeled biped (the closest peer)</li>
+      <li><a href="https://scholar.google.com/scholar?q=Ascento+two-wheeled+jumping+robot">Ascento (ETH Zürich)</a>: 2-wheel jumping, kinematic-loop legs</li>
+      <li><a href="https://scholar.google.com/scholar?q=LQR-assisted+whole-body+control+wheeled+bipedal+robot+kinematic+loops">LQR-assisted WBC with kinematic loops</a></li>
+      <li><a href="https://scholar.google.com/scholar?q=wheel-legged+robot+reinforcement+learning+sim-to-real">Wheel-legged RL (search)</a></li></ul></div>
+    <div class="card"><h3>Learning &amp; sim-to-real</h3><ul>
+      <li><a href="https://scholar.google.com/scholar?q=Learning+agile+and+dynamic+motor+skills+for+legged+robots+Hwangbo">Hwangbo et al. — actuator networks</a></li>
+      <li><a href="https://scholar.google.com/scholar?q=residual+reinforcement+learning+for+robot+control">Residual RL</a></li>
+      <li><a href="https://scholar.google.com/scholar?q=SafeOpt+safe+Bayesian+optimization+quadrotor">SafeOpt — safe BO</a></li>
+      <li><a href="https://github.com/leggedrobotics/legged_gym">legged_gym</a> · <a href="https://github.com/google-deepmind/mujoco">MuJoCo</a> · <a href="https://github.com/isaac-sim/IsaacLab">Isaac Lab</a></li></ul></div>
+    <div class="card"><h3>Hardware references</h3><ul>
+      <li><a href="https://emanual.robotis.com/docs/en/dxl/ax/ax-12a/">AX-12A e-Manual</a> (control table, compliance)</li>
+      <li><a href="https://emanual.robotis.com/docs/en/dxl/x/xl430-w250/">XL430-W250</a> (upgrade path)</li>
+      <li><a href="https://github.com/stm32duino/Arduino_Core_STM32/wiki/HardwareSerial">STM32duino HardwareSerial</a> (single-wire half-duplex)</li>
+      <li><a href="https://github.com/bmellink/IBusBM">IBusBM library</a></li></ul></div>
+    <div class="card"><h3>In this repo</h3><ul>
+      <li><a href="../robot_control_suite/rcbfw/README.md">rcbfw README</a>: the main firmware and GUI</li>
+      <li><a href="Robot_Specification.md">Robot specification</a> · <a href="Hardware_Connections.md">Wiring</a></li>
+      <li><a href="AX12_Control_Table_Mapping.md">AX-12 control table</a></li>
+      <li><a href="Project_History_and_Roadmap.md">Project history</a></li></ul></div>
+  </div>
+</section>
+
+</main>
+<footer>PAW · generated 2026-09-30 from a review of <code>rcbfw</code> firmware, GUI and 21 session logs · MIT License © 2026 Vilas B S</footer>
+</body>
+</html>

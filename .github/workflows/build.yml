@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    paths: ["robot_control_suite/rcbfw/**", ".github/workflows/build.yml"]
+  pull_request:
+    paths: ["robot_control_suite/rcbfw/**", ".github/workflows/build.yml"]
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO
+        run: pip install platformio==6.1.16
+      - name: Build rcbfw firmware
+        run: pio run -d robot_control_suite/rcbfw/firmware
+
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax-check GUI
+        run: python -m py_compile robot_control_suite/rcbfw/gui/*.py
