@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PAW Sim-to-Real Plan</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky left index + single reading column; three tracks colour-coded (model/LQR, MCU, RL) */
+:root{
+  --bg:#f5f6f4; --surface:#ffffff; --sunk:#eceeea; --fg:#1d2321; --muted:#5b6661; --line:#d5dad6;
+  --accent:#b8560f;         /* hardware amber, used for links and emphasis */
+  --lqr:#245fa8; --lqr-bg:#e3ecf8;
+  --mcu:#9a5b00; --mcu-bg:#f8ecd6;
+  --rl:#257a4a;  --rl-bg:#e0f1e6;
+  --warn:#a3261b; --warn-bg:#f9e3e0;
+  --code-bg:#1f2523; --code-fg:#e4e9e5;
+  --f-display:"Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --f-body:"IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#151918; --surface:#1c2120; --sunk:#232928; --fg:#e3e8e5; --muted:#9aa6a0; --line:#323a37;
+  --accent:#f0a05a; --lqr:#86b4ef; --lqr-bg:#1d2a3b; --mcu:#e8b660; --mcu-bg:#33281a;
+  --rl:#7fd3a0; --rl-bg:#1b3125; --warn:#f28b80; --warn-bg:#3a1f1c; --code-bg:#0f1312; --code-fg:#dfe6e2;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#151918; --surface:#1c2120; --sunk:#232928; --fg:#e3e8e5; --muted:#9aa6a0; --line:#323a37;
+  --accent:#f0a05a; --lqr:#86b4ef; --lqr-bg:#1d2a3b; --mcu:#e8b660; --mcu-bg:#33281a;
+  --rl:#7fd3a0; --rl-bg:#1b3125; --warn:#f28b80; --warn-bg:#3a1f1c; --code-bg:#0f1312; --code-fg:#dfe6e2;
+  color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15.5px;line-height:1.6}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.shell{display:grid;grid-template-columns:230px minmax(0,1fr);gap:48px;max-width:1240px;margin:0 auto;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:40px 80px}
+nav.toc{position:sticky;top:calc(env(safe-area-inset-top,0px) + 24px);align-self:start;font-size:14px}
+nav.toc .label{font-family:var(--f-display);font-weight:600;letter-spacing:.06em;text-transform:uppercase;font-size:11.5px;color:var(--muted);margin-bottom:10px}
+nav.toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+nav.toc a{display:flex;gap:10px;align-items:baseline;padding:5px 8px;border-radius:6px;color:var(--fg);text-decoration:none}
+nav.toc a:hover{background:var(--sunk)}
+nav.toc a span{font-family:var(--f-mono);font-size:11.5px;color:var(--muted);min-width:1.6em}
+main{min-width:0;max-width:860px}
+header.top{display:flex;flex-direction:column;gap:14px;padding-bottom:28px;border-bottom:1px solid var(--line);margin-bottom:8px}
+.eyebrow{font-family:var(--f-mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+h1,h2,h3,h4{font-family:var(--f-display);text-wrap:balance;line-height:1.2;margin:0}
+h1{font-size:clamp(30px,4.5vw,44px);font-weight:700;letter-spacing:-.015em}
+h2{font-size:26px;font-weight:600;margin-top:12px}
+h3{font-size:18.5px;font-weight:600;margin-top:28px}
+h4{font-size:15px;font-weight:600;margin-top:18px}
+p{margin:10px 0;max-width:68ch}
+.lede{font-size:17.5px;color:var(--muted);max-width:64ch;margin:0}
+section{padding-top:44px;scroll-margin-top:16px}
+section > .sec-head{display:flex;flex-direction:column;gap:8px;margin-bottom:6px}
+.tracks{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--f-mono);font-size:11.5px;font-weight:500;padding:3px 9px;border-radius:99px;letter-spacing:.02em;white-space:nowrap}
+.chip::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.t-lqr{color:var(--lqr);background:var(--lqr-bg)} .t-mcu{color:var(--mcu);background:var(--mcu-bg)} .t-rl{color:var(--rl);background:var(--rl-bg)}
+.t-all{color:var(--fg);background:var(--sunk)}
+ul,ol{padding-left:22px;margin:10px 0}
+li{margin:4px 0;max-width:68ch}
+code{font-family:var(--f-mono);font-size:.86em;background:var(--sunk);padding:1px 5px;border-radius:4px}
+pre{font-family:var(--f-mono);font-size:12.8px;line-height:1.55;background:var(--code-bg);color:var(--code-fg);padding:16px 18px;border-radius:8px;overflow-x:auto;margin:14px 0}
+pre code{background:none;padding:0;font-size:inherit;color:inherit}
+pre .c{color:#8fa39a}
+.tbl{overflow-x:auto;margin:14px 0;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--f-display);font-weight:600;font-size:12.5px;letter-spacing:.03em;color:var(--muted);background:var(--sunk);white-space:nowrap}
+tr:last-child td{border-bottom:none}
+td.mono{font-family:var(--f-mono);font-size:12.8px;white-space:nowrap}
+.st{font-family:var(--f-mono);font-size:11px;padding:2px 7px;border-radius:4px;white-space:nowrap}
+.st-known{background:var(--rl-bg);color:var(--rl)} .st-measure{background:var(--mcu-bg);color:var(--mcu)} .st-cad{background:var(--lqr-bg);color:var(--lqr)}
+.note{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:14px 16px;margin:16px 0}
+.note.warn{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));background:var(--warn-bg)}
+.note b.h{display:block;font-family:var(--f-display);margin-bottom:4px}
+.note p{margin:4px 0}
+.phases{display:grid;gap:10px;margin:18px 0}
+.phase{display:grid;grid-template-columns:64px minmax(0,1fr);gap:14px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.phase .pid{font-family:var(--f-mono);font-weight:500;font-size:13px;color:var(--muted)}
+.phase .pid b{display:block;font-family:var(--f-display);font-size:22px;color:var(--fg)}
+.phase h4{margin:0 0 4px}
+.phase p{margin:2px 0 8px;color:var(--muted);font-size:14.5px}
+.phase .meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:12.5px;color:var(--muted)}
+.gate{font-size:13.5px;margin-top:6px}
+.gate b{font-family:var(--f-display)}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+.card h4{margin:0 0 6px}
+.card p,.card li{font-size:14.5px}
+.eq{font-family:var(--f-mono);font-size:13.5px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--lqr);padding:12px 16px;border-radius:6px;overflow-x:auto;white-space:pre;margin:14px 0;line-height:1.7}
+.diagram{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;margin:16px 0}
+.order{counter-reset:o;list-style:none;padding:0}
+.order li{counter-increment:o;display:grid;grid-template-columns:28px minmax(0,1fr);gap:8px}
+.order li::before{content:counter(o);font-family:var(--f-mono);font-size:12px;color:var(--accent);font-weight:500;padding-top:3px}
+footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+@media (max-width:980px){
+  .shell{grid-template-columns:minmax(0,1fr);gap:0;padding-block:20px 60px}
+  nav.toc{position:static;margin-bottom:12px}
+  nav.toc ol{flex-direction:row;flex-wrap:nowrap;overflow-x:auto;gap:4px;padding-bottom:6px}
+  nav.toc a{white-space:nowrap;background:var(--surface);border:1px solid var(--line)}
+}
+@media (max-width:640px){
+  .grid2{grid-template-columns:minmax(0,1fr)}
+  .phase{grid-template-columns:minmax(0,1fr);gap:4px}
+  .phase .pid b{display:inline;margin-right:8px}
+  body{font-size:15px}
+}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+</style>
+
+<div class="shell">
+<nav class="toc" aria-label="Sections">
+  <div class="label">Plan index</div>
+  <ol>
+    <li><a href="#start"><span>00</span>Read this first</a></li>
+    <li><a href="#arch"><span>01</span>Architecture</a></li>
+    <li><a href="#phases"><span>02</span>Phases &amp; gates</a></li>
+    <li><a href="#sysid"><span>03</span>Measure the robot</a></li>
+    <li><a href="#model"><span>04</span>Build the sim model</a></li>
+    <li><a href="#lqr"><span>05</span>LQR design</a></li>
+    <li><a href="#esp"><span>06</span>ESP32-S3 port</a></li>
+    <li><a href="#rl"><span>07</span>RL environment</a></li>
+    <li><a href="#deploy"><span>08</span>Deploy &amp; safety</a></li>
+    <li><a href="#repo"><span>09</span>Repo layout</a></li>
+    <li><a href="#refs"><span>10</span>What to study</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="top">
+  <div class="eyebrow">PAW wheel-legged biped · plan v1 · Nov 2026</div>
+  <h1>From the real robot to a matching simulator, then LQR and RL on an ESP32-S3</h1>
+  <p class="lede">One measured model of the real robot feeds both controllers. LQR gets you a provably stable balancer fast. The same model, with randomised parameters, trains an RL policy. Both run on the ESP32-S3, which replaces the STM32F103.</p>
+  <div class="tracks">
+    <span class="chip t-lqr">Model &amp; LQR track</span>
+    <span class="chip t-mcu">ESP32-S3 firmware track</span>
+    <span class="chip t-rl">RL track</span>
+  </div>
+</header>
+
+<!-- 00 -->
+<section id="start">
+  <div class="sec-head"><div class="eyebrow">00</div><h2>Read this first</h2></div>
+  <p>The simulator is the centre of everything. If the sim matches the real robot, LQR gains copy straight across and RL policies transfer. If it doesn't, both fail on hardware. So most of the effort goes into <b>measuring</b> the robot and <b>checking the sim against logged real data</b>, before any controller work.</p>
+  <h3>Reading order</h3>
+  <ol class="order">
+    <li><span><a href="#arch">Architecture</a>: how the three tracks connect and what runs where.</span></li>
+    <li><span><a href="#phases">Phases &amp; gates</a>: the order of work, and the test each phase must pass before you move on.</span></li>
+    <li><span><a href="#sysid">Measure the robot</a>: the parameter table. Start measuring this week; it blocks everything else.</span></li>
+    <li><span><a href="#esp">ESP32-S3 port</a>: can start in parallel with modelling. Order the board and level shifters now.</span></li>
+    <li><span><a href="#model">Sim model</a> → <a href="#lqr">LQR</a> → <a href="#rl">RL</a>: in that order.</span></li>
+  </ol>
+  <div class="note">
+    <b class="h">Three decisions this plan makes for you</b>
+    <p><b>Simulator: MuJoCo</b> (with MJX / MuJoCo Playground for GPU RL). Your legs are a closed 5-bar loop; MuJoCo handles loop closure natively with equality constraints. Isaac Lab / PhysX articulations are trees and need workarounds for closed chains.</p>
+    <p><b>Controller input: motor voltage (PWM duty), not torque.</b> You have no current sensing, so model the motor electrically and let LQR and RL command what the firmware actually sets.</p>
+    <p><b>RL deploys as residual-over-LQR first.</b> The policy adds a correction to the LQR command, clipped. LQR stays as the safety net while you learn how the policy behaves on hardware.</p>
+  </div>
+</section>
+
+<!-- 01 -->
+<section id="arch">
+  <div class="sec-head"><div class="eyebrow">01</div><h2>Architecture</h2></div>
+  <p>Real robot data flows into the model; the model produces LQR gains and an RL policy; both become C arrays in the ESP32-S3 firmware; the firmware logs the same signals the sim produces, so you can overlay them.</p>
+  <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph REAL["Real robot"]
+    R1["Bench tests<br/>(mass, CoM, inertia,<br/>motor, servo, IMU)"]
+    R2["ESP32-S3 logs<br/>200 Hz binary UDP"]
+  end
+  subgraph SIM["MuJoCo model (paw.xml)"]
+    M1["CAD meshes +<br/>measured masses"]
+    M2["Actuator models<br/>DC motor + L298N + AX-12"]
+    M3["Validation:<br/>replay real inputs,<br/>compare traces"]
+  end
+  subgraph CTRL["Controllers"]
+    L["LQR<br/>gain table vs leg height"]
+    P["RL policy<br/>PPO, domain randomised"]
+  end
+  subgraph MCU["ESP32-S3 firmware"]
+    F1["Core 1: 400 Hz balance loop"]
+    F2["Core 1: 100 Hz leg IK + AX-12"]
+    F3["Core 0: Wi-Fi telemetry, RC"]
+  end
+  R1 --> M1 & M2
+  M1 & M2 --> M3
+  R2 --> M3
+  M3 --> L & P
+  L -->|"K[] header"| F1
+  P -->|"weights header"| F1
+  F1 --> R2
+</pre>
+  </div>
+  <div class="grid2">
+    <div class="card"><h4><span class="chip t-lqr">LQR</span></h4><p>Linearise the validated model around upright at several leg heights. Solve the discrete Riccati equation for each. Interpolate gains on the MCU by current leg height. Expected outcome: stable balance with no hand-tuned PID cascade.</p></div>
+    <div class="card"><h4><span class="chip t-rl">RL</span></h4><p>Same MJCF, wrapped in a Gym/Playground environment with randomised mass, motor and latency. PPO trains a small MLP (about 20k parameters). Expected outcome: balance plus velocity, yaw and height tracking, and push recovery beyond what a linear controller handles.</p></div>
+  </div>
+</section>
+
+<!-- 02 -->
+<section id="phases">
+  <div class="sec-head"><div class="eyebrow">02</div><h2>Phases &amp; gates</h2></div>
+  <p>Durations assume evenings and weekends. Phases P4 and P1–P3 run in parallel. Do not skip a gate: each one is a measurable test that tells you the next phase can work.</p>
+  <div class="phases">
+    <div class="phase"><div class="pid"><b>P0</b>1–2 wk</div><div>
+      <h4>Measure the robot</h4><p>Weigh every part, find the CoM, swing-test inertia, characterise the motors, servos and IMU.</p>
+      <div class="meta"><span class="chip t-lqr">model</span></div>
+      <div class="gate"><b>Gate:</b> every row in the <a href="#sysid">parameter table</a> has a measured value and a method recorded.</div></div></div>
+    <div class="phase"><div class="pid"><b>P1</b>1–2 wk</div><div>
+      <h4>Build the MuJoCo model</h4><p>CAD → URDF → MJCF, closed-loop legs, measured masses, actuator models, sensor noise.</p>
+      <div class="meta"><span class="chip t-lqr">model</span></div>
+      <div class="gate"><b>Gate:</b> passive drop test from 10° falls to the ground in the same time as the real robot (±10%).</div></div></div>
+    <div class="phase"><div class="pid"><b>P2</b>1 wk</div><div>
+      <h4>Validate sim against real logs</h4><p>Replay logged PWM sequences from the real robot into the sim and compare pitch, wheel speed and servo angle traces.</p>
+      <div class="meta"><span class="chip t-lqr">model</span><span class="chip t-mcu">needs P4 logging</span></div>
+      <div class="gate"><b>Gate:</b> wheel-speed step response within 10% (rise time and steady state); pitch traces from a 1 s open-loop replay stay within 2°.</div></div></div>
+    <div class="phase"><div class="pid"><b>P3</b>1 wk</div><div>
+      <h4>LQR design in sim</h4><p>Linearise, solve DARE at 5 leg heights, test in the full nonlinear sim with noise and latency.</p>
+      <div class="meta"><span class="chip t-lqr">LQR</span></div>
+      <div class="gate"><b>Gate:</b> in sim with ±20% parameter error and 5 ms extra latency, recovers from a 1.5 N·s push and holds position within 5 cm.</div></div></div>
+    <div class="phase"><div class="pid"><b>P4</b>2–3 wk</div><div>
+      <h4>ESP32-S3 bring-up</h4><p>Staged bring-up (servo → motors/encoders → IMU → telemetry → full loop), mirroring your <code>black_pill_dev/01–05</code> sequence.</p>
+      <div class="meta"><span class="chip t-mcu">MCU</span><span class="chip t-all">starts in parallel with P0</span></div>
+      <div class="gate"><b>Gate:</b> 400 Hz loop with jitter &lt; 50 µs over 10 minutes, all sensors logged over Wi-Fi with no dropped packets at 200 Hz.</div></div></div>
+    <div class="phase"><div class="pid"><b>P5</b>1 wk</div><div>
+      <h4>LQR on hardware</h4><p>Flash gain table, harness test, then free balance. Compare real vs sim response to the same push.</p>
+      <div class="meta"><span class="chip t-lqr">LQR</span><span class="chip t-mcu">MCU</span></div>
+      <div class="gate"><b>Gate:</b> balances 5 minutes untouched at three leg heights; real push response matches sim within 30%.</div></div></div>
+    <div class="phase"><div class="pid"><b>P6</b>2–4 wk</div><div>
+      <h4>RL environment and training</h4><p>Wrap the validated MJCF, domain randomisation, curriculum, PPO. Train residual policy first, then a full policy.</p>
+      <div class="meta"><span class="chip t-rl">RL</span><span class="chip t-all">starts after P2</span></div>
+      <div class="gate"><b>Gate:</b> policy survives 1000 randomised episodes of 20 s with &lt; 1% falls, and runs in &lt; 1 ms on the ESP32-S3 (benchmarked).</div></div></div>
+    <div class="phase"><div class="pid"><b>P7</b>2 wk</div><div>
+      <h4>RL on hardware</h4><p>Residual policy with action clipping and LQR fallback, then the full policy behind the same safety layer.</p>
+      <div class="meta"><span class="chip t-rl">RL</span><span class="chip t-mcu">MCU</span></div>
+      <div class="gate"><b>Gate:</b> beats LQR on push recovery and velocity tracking in matched real tests.</div></div></div>
+  </div>
+</section>
+
+<!-- 03 -->
+<section id="sysid">
+  <div class="sec-head"><div class="eyebrow">03</div><h2>Measure the robot (system identification)</h2><div class="tracks"><span class="chip t-lqr">model</span></div></div>
+  <p>This table is the input to the model. "Known" values come from <code>docs/Robot_Specification.md</code>. Everything marked "measure" is something the sim needs and the docs do not have yet. Record each value, its method and the date in a new <code>sim/params/paw_params.yaml</code> so the MJCF is generated from it rather than hand-edited.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Parameter</th><th>Current value</th><th>Status</th><th>How to measure</th></tr></thead>
+    <tbody>
+      <tr><td>Femur / tibia length</td><td class="mono">55 / 100 mm</td><td><span class="st st-known">known</span></td><td>Check joint centre to joint centre with calipers.</td></tr>
+      <tr><td>Servo mount spacing</td><td class="mono">±30 mm</td><td><span class="st st-known">known</span></td><td>From IK code and CAD.</td></tr>
+      <tr><td>Wheel radius</td><td class="mono">32.5 mm</td><td><span class="st st-measure">measure</span></td><td>Roll 10 turns on the floor, measure distance ÷ 20π. Loaded radius is smaller than nominal tyre radius.</td></tr>
+      <tr><td>Track width (wheel contact to contact)</td><td class="mono">≈ 240 mm?</td><td><span class="st st-measure">measure</span></td><td>Ink on tyres, roll, measure the two lines. Needed for yaw dynamics.</td></tr>
+      <tr><td>Total mass</td><td class="mono">≥ 1074 g</td><td><span class="st st-measure">measure</span></td><td>Kitchen scale, whole robot with battery. The doc subtotal misses electronics and hardware.</td></tr>
+      <tr><td>Per-link masses (femurs, tibias, wheel + motor)</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Weigh spare printed parts; for assembled ones use CAD volume × measured print density.</td></tr>
+      <tr><td>Body CoM (x, z) vs. axle</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Lock legs at a known height. Balance the robot on a knife edge (or two scales under the wheels and a prop) to find x; tilt test at two angles to find z. Repeat at 3 leg heights.</td></tr>
+      <tr><td>Body pitch inertia</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Bifilar or compound pendulum: hang by the axle, time 20 small swings. I = m·g·d·T²/(4π²) − m·d².</td></tr>
+      <tr><td>Motor gear ratio, encoder CPR</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Turn the wheel exactly 10 revolutions by hand, read counts. Use 4× quadrature on the ESP32 (PCNT does this in hardware).</td></tr>
+      <tr><td>Motor R, Ke, Kt, friction</td><td class="mono">300 rpm @ 12 V no-load</td><td><span class="st st-measure">measure</span></td><td>Multimeter for R (rotate shaft between readings, average). No-load speed at 4, 6, 8, 10, 12 V gives Ke and Coulomb/viscous friction. Kt = Ke in SI units.</td></tr>
+      <tr><td>L298N / driver deadband and drop</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Sweep PWM up from 0, note the duty where the wheel starts (static friction + deadband). Measure motor terminal voltage vs. battery at full duty (L298N loses ~2 V).</td></tr>
+      <tr><td>Gearbox backlash</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Hold the motor shaft, rock the wheel, read the encoder (or a protractor). Often 1–3°.</td></tr>
+      <tr><td>AX-12 response</td><td class="mono">1.5 N·m stall, 59 rpm</td><td><span class="st st-measure">measure</span></td><td>Command a 30° step and read present position at 100 Hz. Fit kp/kv and delay. Repeat with the robot standing (loaded).</td></tr>
+      <tr><td>IMU noise and bias</td><td class="mono">MPU6050</td><td><span class="st st-measure">measure</span></td><td>Log 60 s stationary at loop rate. Std-dev per axis = sim noise; mean gyro = bias. Turn on DLPF (reg 0x1A) first.</td></tr>
+      <tr><td>Loop latency</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Toggle a GPIO at IMU read start and at PWM write; scope it. Sim adds this as a delay buffer.</td></tr>
+      <tr><td>Tyre–floor friction</td><td class="mono">–</td><td><span class="st st-measure">measure</span></td><td>Tilt a board with the robot on it (wheels locked) until it slides: μ = tan(angle).</td></tr>
+      <tr><td>Link shapes for collision / visuals</td><td class="mono">BipedalMeshes.zip</td><td><span class="st st-cad">CAD</span></td><td>Already exported: STEP, STL per part in assembly pose, and the .f3d. Use for geometry only; masses come from the scale.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="eq">DC motor + gearbox (per wheel), voltage input V, wheel speed ω:
+  τ_wheel = N·Kt/R · (V_eff − N·Ke·ω) − b·ω − τ_c·sign(ω)
+  V_eff   = duty · V_batt − V_drop        (V_drop ≈ 2 V for L298N, ≈ 0.2 V for TB6612)
+Max wheel speed check: 300 rpm × 2π/60 × 0.0325 m ≈ 1.02 m/s at 12 V no-load.</div>
+  <div class="note warn"><b class="h">Change the motor driver before you model it</b>
+    <p>Your own research notes (<code>docs/PAW_Research_Notes.md</code>, finding 7) already flag the L298N. Its 2 V voltage drop varies with current and its ~1 kHz PWM causes audible, nonlinear behaviour near zero. A TB6612FNG (or DRV8871 per motor) at 20 kHz is close to linear, which makes the motor model, the LQR and the RL policy all transfer better. Swap it during the ESP32-S3 rewire so you only identify the motors once.</p></div>
+</section>
+
+<!-- 04 -->
+<section id="model">
+  <div class="sec-head"><div class="eyebrow">04</div><h2>Build the simulation model</h2><div class="tracks"><span class="chip t-lqr">model</span><span class="chip t-rl">shared with RL</span></div></div>
+  <h3>Pipeline</h3>
+  <ol>
+    <li><b>CAD to URDF.</b> Open <code>bipedal_assembly.f3d</code> in Fusion and export with the <i>fusion2urdf</i> add-in, or build the URDF by hand from the per-part STLs in <code>parts_stl_assembly_pose/</code>. Each joint origin must sit exactly on a servo horn or wheel axis.</li>
+    <li><b>URDF to MJCF.</b> Load in MuJoCo, save as XML, then edit by hand. From here on <code>sim/model/paw.xml</code> is the source of truth, generated from <code>paw_params.yaml</code> by a small Python script so values never drift.</li>
+    <li><b>Close the leg loops.</b> URDF can't express the 5-bar. Model each leg as two open chains (left femur → left tibia, right femur → right tibia) and join the two tibia ends with an <code>equality connect</code> constraint. The wheel axle hangs off one tibia.</li>
+    <li><b>Replace CAD inertias with measured ones.</b> Use <code>inertial</code> tags with the measured mass and CoM; scale inertia from CAD shape to the measured mass.</li>
+    <li><b>Add actuators</b> that behave like the real hardware (below), and <b>sensors</b> matching the real ones: gyro, accelerometer, wheel joint position (quantised to encoder counts), servo position.</li>
+    <li><b>Keyframes</b> for standing at 5 leg heights (e.g. foot y = 100, 115, 130, 140, 150 mm), solved with your existing IK so sim and firmware agree on servo angles.</li>
+  </ol>
+<pre><code><span class="c">&lt;!-- one leg: close the 5-bar loop where the two tibias meet --&gt;</span>
+&lt;equality&gt;
+  &lt;connect body1="tibia_L1" body2="tibia_R1" anchor="0 0 -0.100" solref="0.002 1"/&gt;
+&lt;/equality&gt;
+
+&lt;actuator&gt;
+  <span class="c">&lt;!-- wheel motor, ctrl = volts. tau = g*V + b2*qvel  (affine bias = back-EMF) --&gt;</span>
+  <span class="c">&lt;!-- g = N*Kt/R, b2 = -(N^2*Kt*Ke/R)  : fill from paw_params.yaml --&gt;</span>
+  &lt;general name="wheel_L" joint="wheel_L" ctrlrange="-12 12"
+           gainprm="G" biastype="affine" biasprm="0 0 -B"/&gt;
+  <span class="c">&lt;!-- AX-12 as a stiff, torque-limited position servo --&gt;</span>
+  &lt;position name="hip_L1" joint="femur_L1" kp="KP" kv="KV" forcerange="-1.5 1.5"/&gt;
+&lt;/actuator&gt;
+
+&lt;default&gt;
+  &lt;joint armature="ROTOR_I_x_N2" damping="B_VISC" frictionloss="TAU_C"/&gt;
+&lt;/default&gt;</code></pre>
+  <h3>What makes the sim "the real robot"</h3>
+  <p>Mass and geometry are the easy part. Sim-to-real gaps on robots this size almost always come from the actuators and timing. Model all of these explicitly:</p>
+  <div class="grid2">
+    <div class="card"><h4>Wheel motor</h4><ul><li>Voltage input with back-EMF (above)</li><li>Rotor inertia reflected as <code>armature</code> = J·N²</li><li>Coulomb + viscous friction</li><li>Driver deadband and voltage drop, battery sag (10.5–12.6 V)</li><li>Backlash: a small free-play joint or a deadzone on the encoder reading</li></ul></div>
+    <div class="card"><h4>AX-12 servo</h4><ul><li>P-controller with torque limit 1.5 N·m and speed cap ~6 rad/s</li><li>Compliance margin/slope mapped to kp</li><li>Position quantised to 1024 steps over 300°</li><li>Command delay: 100 Hz update + bus transaction time</li></ul></div>
+    <div class="card"><h4>Sensors</h4><ul><li>Gyro and accel noise and bias from the stationary log</li><li>Encoder quantisation to real CPR</li><li>IMU mounted at its real position on the body (accel sees centripetal terms)</li></ul></div>
+    <div class="card"><h4>Timing</h4><ul><li>Sim timestep 1 ms, controller runs every 2.5 ms (400 Hz)</li><li>One-step action delay buffer equal to measured latency</li><li>Same filters (complementary / Kalman) as firmware, ported 1:1</li></ul></div>
+  </div>
+  <h3>Validation tests (gate P1–P2)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Test</th><th>Real procedure</th><th>Pass criterion</th></tr></thead>
+    <tbody>
+      <tr><td>Passive fall</td><td>Motors off, release from 10° lean, log pitch at 400 Hz</td><td>Time to 45° within ±10%</td></tr>
+      <tr><td>Wheel step, held in air</td><td>Robot on a stand, step 3 / 6 / 9 V to one motor</td><td>Rise time and final speed within 10%</td></tr>
+      <tr><td>Servo step</td><td>30° step on one hip, standing and lifted</td><td>Trajectory within 3° throughout</td></tr>
+      <tr><td>Open-loop replay</td><td>Log PWM from a real balancing run with the current PID, replay into sim from the same initial state</td><td>Pitch within 2° for the first 1 s</td></tr>
+      <tr><td>Closed-loop match</td><td>Run your current STM32 PID gains in sim</td><td>Similar oscillation frequency as the logs in <code>rcbfw/gui/logs</code></td></tr>
+    </tbody>
+  </table></div>
+  <p>If a test fails, fit the uncertain parameters (friction, kp, CoM height) to the logs with <code>scipy.optimize.least_squares</code> over the replay error. Keep the fitted values in <code>paw_params.yaml</code> with a note saying they were fitted.</p>
+</section>
+
+<!-- 05 -->
+<section id="lqr">
+  <div class="sec-head"><div class="eyebrow">05</div><h2>LQR design</h2><div class="tracks"><span class="chip t-lqr">LQR</span></div></div>
+  <h3>State and input</h3>
+  <p>Treat the robot as a wheeled inverted pendulum whose pendulum length changes with leg height. Legs are held by the servos, so for balance they are a slow, separate subsystem.</p>
+  <div class="eq">x = [ p,  ṗ,  θ,  θ̇,  ψ,  ψ̇ ]ᵀ        p = forward position (from wheel encoders)
+                                    θ = body pitch, ψ = yaw
+u = [ V_L,  V_R ]ᵀ                  motor voltages (PWM duty × V_batt)
+
+Nonlinear model (sagittal plane, m_b body, m_w wheels, l = CoM height above axle):
+  (m_b + m_w + I_w/r²)·p̈ + m_b·l·cosθ·θ̈ − m_b·l·sinθ·θ̇² = τ/r
+  m_b·l·cosθ·p̈ + (I_b + m_b·l²)·θ̈ − m_b·g·l·sinθ = −τ
+  τ = τ_L + τ_R  from the motor model;  yaw uses (τ_R − τ_L)·(d/2r)
+
+Linearise at θ = 0 → ẋ = A(l)·x + B(l)·u → discretise at Ts = 2.5 ms → Φ, Γ
+Discrete LQR: K = (R + ΓᵀPΓ)⁻¹ ΓᵀPΦ,  with P from the DARE
+Control law:  u = −K(l)·(x − x_ref) + u_ff</div>
+  <h3>Two ways to get A and B (do both and compare)</h3>
+  <div class="grid2">
+    <div class="card"><h4>Analytic, 6-state</h4><p>From the equations above with measured parameters. Easy to read, easy to schedule over l. Use it to sanity-check the numerical one.</p></div>
+    <div class="card"><h4>Numerical from MuJoCo</h4><p><code>mjd_transitionFD</code> on the full MJCF at each standing keyframe, then reduce to the 6 balance states. Captures leg masses and the IMU offset the analytic model ignores.</p></div>
+  </div>
+<pre><code>import mujoco, numpy as np, scipy.linalg as sla
+
+m = mujoco.MjModel.from_xml_path("sim/model/paw.xml"); d = mujoco.MjData(m)
+gains = {}
+for k, height in enumerate([100, 115, 130, 140, 150]):        <span class="c"># mm, one keyframe each</span>
+    mujoco.mj_resetDataKeyframe(m, d, k); mujoco.mj_forward(m, d)
+    nx = 2 * m.nv + m.na
+    A = np.zeros((nx, nx)); B = np.zeros((nx, m.nu))
+    mujoco.mjd_transitionFD(m, d, 1e-6, True, A, B, None, None)  <span class="c"># discrete, at m.opt.timestep</span>
+    Ar, Br = reduce_to_balance_states(A, B, m)                   <span class="c"># pick p, θ, ψ and rates; wheel inputs only</span>
+    Ar, Br = resample(Ar, Br, Ts=0.0025)                         <span class="c"># match firmware loop rate</span>
+    Q = np.diag([20, 2, 400, 10, 5, 1]); R = np.diag([1, 1]) * 0.5
+    P = sla.solve_discrete_are(Ar, Br, Q, R)
+    gains[height] = np.linalg.solve(R + Br.T @ P @ Br, Br.T @ P @ Ar)
+write_c_header("firmware/include/lqr_gains.h", gains)          <span class="c"># float K[5][2][6]</span></code></pre>
+  <h3>Tuning Q and R</h3>
+  <ul>
+    <li>Start with Bryson's rule: Q<sub>ii</sub> = 1 / (max acceptable error)², R<sub>ii</sub> = 1 / (max voltage)². For example, θ max 3° → Q<sub>θθ</sub> ≈ 365; p max 0.2 m → 25; V max 8 V → R ≈ 0.016.</li>
+    <li>Raise R if wheels chatter or saturate; raise Q<sub>θθ</sub> if it leans too far before reacting.</li>
+    <li>Check closed-loop poles: all inside the unit circle with a margin, and the fastest pole well below the Nyquist of the loop rate.</li>
+    <li>Run a Monte-Carlo of 200 sims with ±20% parameter error and added latency. Pick the Q/R that survives all of them, not the one that looks best on the nominal model.</li>
+  </ul>
+  <h3>Practical additions on top of plain LQR</h3>
+  <ul>
+    <li><b>Gain scheduling:</b> linearly interpolate K between the two nearest leg heights every loop.</li>
+    <li><b>Integral action on pitch offset</b> (LQI) or a slow CoM-offset estimator, to remove lean bias from battery or IMU mounting. This replaces the PID integrator that your logs show saturating.</li>
+    <li><b>Velocity command:</b> drive by moving x_ref (p_ref integrates the commanded speed, ṗ_ref = command). No separate outer PID needed.</li>
+    <li><b>Friction / deadband feed-forward</b> in u_ff, using the measured deadband.</li>
+    <li><b>State estimate:</b> θ from a complementary or small Kalman filter at 400 Hz; ṗ from encoder differences, low-passed at ~30 Hz, not the 2.6 Hz EMA the current firmware uses.</li>
+  </ul>
+</section>
+
+<!-- 06 -->
+<section id="esp">
+  <div class="sec-head"><div class="eyebrow">06</div><h2>ESP32-S3 port</h2><div class="tracks"><span class="chip t-mcu">MCU</span></div></div>
+  <p>The ESP32-S3 has two 240 MHz cores and a single-precision FPU, so LQR, a Kalman filter and a 20k-parameter MLP all fit inside a 400 Hz loop with room to spare. It also has hardware quadrature counters (PCNT) and a motor PWM peripheral (MCPWM), which fix two weaknesses of the current STM32 setup.</p>
+  <h3>Hardware changes</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Item</th><th>STM32 today</th><th>ESP32-S3 plan</th></tr></thead>
+    <tbody>
+      <tr><td>Board</td><td>Bluepill F103C8, 72 MHz, no FPU</td><td>ESP32-S3-DevKitC-1 (N8R8 or N16R8)</td></tr>
+      <tr><td>Motor driver</td><td>L298N, ~1 kHz PWM</td><td>TB6612FNG or 2× DRV8871, 20 kHz via MCPWM</td></tr>
+      <tr><td>Encoders</td><td>Interrupt, 1× decoding</td><td>PCNT hardware, 4× decoding, glitch filter on</td></tr>
+      <tr><td>AX-12 bus</td><td>USART2 half-duplex, 10 kΩ hack</td><td>UART1 + 74LVC2G241 (or 74HC126 + 74HC04) tri-state buffer with a DIR pin. ESP32 GPIO is <b>not 5 V tolerant</b></td></tr>
+      <tr><td>IMU</td><td>MPU6050 I²C</td><td>Keep MPU6050 at 400 kHz for now; plan an ICM-42688-P on SPI later (lower noise, 1–8 kHz ODR)</td></tr>
+      <tr><td>Telemetry</td><td>3DR radio, 115200, 10 Hz text</td><td>Wi-Fi UDP binary at 200 Hz (or ESP-NOW to a second S3 on USB). 3DR kept as an option on UART0</td></tr>
+      <tr><td>RC</td><td>iBUS on USART1</td><td>iBUS on UART2 RX</td></tr>
+      <tr><td>Battery monitor</td><td>none</td><td>ADC1 via 47 k / 10 k divider, low-voltage cutoff at 3.4 V/cell</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Proposed pin map</h3>
+  <p>For the DevKitC-1 with octal PSRAM. Avoid GPIO 0, 3, 45, 46 (strapping), 19/20 (native USB), 26–32 (flash), 33–37 (octal PSRAM). Check against your exact board's pinout before wiring.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Function</th><th>GPIO</th><th>Peripheral</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Motor L PWM / IN1 / IN2</td><td class="mono">4 / 5 / 6</td><td>MCPWM0</td><td>20 kHz</td></tr>
+      <tr><td>Motor R PWM / IN1 / IN2</td><td class="mono">7 / 15 / 16</td><td>MCPWM0</td><td>TB6612 STBY to 3V3 or a GPIO for e-stop</td></tr>
+      <tr><td>Encoder L A / B</td><td class="mono">17 / 18</td><td>PCNT unit 0</td><td>Power Hall sensors from 3V3, or divide 5 V outputs</td></tr>
+      <tr><td>Encoder R A / B</td><td class="mono">8 / 9</td><td>PCNT unit 1</td><td>Mirror-mounted: invert in software, as today</td></tr>
+      <tr><td>AX-12 TX / RX / DIR</td><td class="mono">10 / 11 / 14</td><td>UART1</td><td>1 Mbaud through the buffer, 5 V side on the bus</td></tr>
+      <tr><td>IMU SDA / SCL</td><td class="mono">41 / 42</td><td>I²C0</td><td>400 kHz; INT on GPIO 2 for data-ready</td></tr>
+      <tr><td>IMU SPI (later)</td><td class="mono">12 / 21 / 13 / 38</td><td>SPI2</td><td>SCK / MOSI / MISO / CS</td></tr>
+      <tr><td>iBUS RX</td><td class="mono">39</td><td>UART2</td><td>Check receiver output level before connecting</td></tr>
+      <tr><td>3DR radio (optional)</td><td class="mono">43 / 44</td><td>UART0</td><td>Console moves to native USB CDC</td></tr>
+      <tr><td>Battery sense</td><td class="mono">1</td><td>ADC1_CH0</td><td>Use ADC1; ADC2 conflicts with Wi-Fi</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Firmware structure</h3>
+  <div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  T["gptimer ISR<br/>400 Hz"] -->|task notify| C
+  subgraph CORE1["Core 1 (control, highest priority)"]
+    C["ctrl_task 400 Hz<br/>IMU read → filter → PCNT read<br/>→ LQR / policy → safety → MCPWM"]
+    S["servo_task 100 Hz<br/>leg IK → AX-12 SYNC_WRITE<br/>→ read one servo per tick"]
+  end
+  subgraph CORE0["Core 0 (Wi-Fi stack lives here)"]
+    W["telem_task 200 Hz<br/>UDP binary log + command RX"]
+    R["rc_task<br/>iBUS parse, failsafe"]
+  end
+  C -->|"lock-free ring buffer"| W
+  R -->|"atomic command struct"| C
+  W -->|"params (gains, Q/R set)"| C
+  S <-->|"leg height l"| C
+</pre>
+  </div>
+  <ul>
+    <li><b>Framework:</b> PlatformIO with Arduino-ESP32 core 3.x (built on ESP-IDF 5), calling the IDF drivers directly: <code>driver/pulse_cnt.h</code>, <code>driver/mcpwm_prelude.h</code>, <code>driver/gptimer.h</code>. The official PlatformIO espressif32 platform has lagged on core 3.x; the community <i>pioarduino</i> platform tracks it. Pure ESP-IDF is the alternative if you prefer.</li>
+    <li><b>One shared header</b> <code>paw_params.h</code> generated from <code>paw_params.yaml</code>: geometry, CPR, calibration (818 / 441), gain tables. Firmware and sim never disagree on a constant.</li>
+    <li><b>Reuse your IK:</b> port <code>solve_ik</code> and <code>map_angle_to_ax12</code> from the current firmware as-is, and unit-test them against <code>twin_kinematics.py</code> on the host.</li>
+    <li><b>Telemetry packet:</b> one packed struct per control tick, with the same fields the sim logs, so one Python script can overlay real and sim.</li>
+  </ul>
+<pre><code>typedef struct __attribute__((packed)) {
+  uint32_t t_us;  uint16_t seq;  uint8_t mode;      <span class="c">// 0 idle, 1 LQR, 2 residual RL, 3 full RL</span>
+  float pitch, pitch_rate, roll, yaw_rate;           <span class="c">// rad, rad/s</span>
+  float acc[3], gyro[3];                             <span class="c">// raw, for re-filtering offline</span>
+  int32_t enc_l, enc_r;  float v_wheel_l, v_wheel_r;
+  float u_lqr[2], u_rl[2], u_out[2];                 <span class="c">// volts, before/after safety</span>
+  float leg_h, foot_cmd[4];  uint16_t servo_pos[4];
+  float vbatt;  uint16_t loop_us;  uint8_t flags;
+} telem_t;                                           <span class="c">// ~130 B × 200 Hz ≈ 26 kB/s, fine over UDP</span></code></pre>
+  <h3>Bring-up sequence (gate P4)</h3>
+  <ol>
+    <li><code>esp32s3_dev/01_servo</code>: AX-12 ping, read, SYNC_WRITE through the buffer. Confirm no echo bytes leak into RX.</li>
+    <li><code>02_motors_encoders</code>: MCPWM + PCNT; record the motor sweep for system ID.</li>
+    <li><code>03_imu</code>: DLPF, gyro bias calibration, 60 s noise log.</li>
+    <li><code>04_telemetry</code>: UDP struct stream and the Python receiver; check sequence numbers for drops.</li>
+    <li><code>05_full_400hz_profile</code>: everything running, measure loop time and jitter with a GPIO toggle on a scope or logic analyser.</li>
+  </ol>
+</section>
+
+<!-- 07 -->
+<section id="rl">
+  <div class="sec-head"><div class="eyebrow">07</div><h2>RL environment</h2><div class="tracks"><span class="chip t-rl">RL</span></div></div>
+  <p>The RL environment is the validated MJCF plus randomisation, a reward and a curriculum. Only start this after P2, because a policy trained on an unvalidated model learns to exploit the model's mistakes.</p>
+  <h3>Tooling</h3>
+  <div class="grid2">
+    <div class="card"><h4>Recommended: MuJoCo Playground (MJX, JAX)</h4><p>Thousands of parallel environments on one GPU; trains balance in minutes. Ships PPO via Brax. Works on a free Colab GPU if you have no local GPU.</p></div>
+    <div class="card"><h4>Fallback: Gymnasium + Stable-Baselines3</h4><p>CPU MuJoCo, 16–32 parallel envs. Slower (hours) but simpler to debug. Use it to prototype the reward, then move to MJX.</p></div>
+  </div>
+  <h3>Observation and action</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Observation (≈ 24 values)</th><th>Source on the real robot</th></tr></thead>
+    <tbody>
+      <tr><td>Projected gravity (3) or pitch, roll</td><td>IMU filter output</td></tr>
+      <tr><td>Body angular velocity (3)</td><td>Gyro, bias removed</td></tr>
+      <tr><td>Wheel velocities (2)</td><td>PCNT, filtered</td></tr>
+      <tr><td>Leg state: foot x, y per leg (4)</td><td>Forward kinematics from servo positions (or the last command if reads are slow)</td></tr>
+      <tr><td>Previous action (4)</td><td>Firmware memory</td></tr>
+      <tr><td>Commands: forward speed, yaw rate, leg height (3)</td><td>RC sticks</td></tr>
+      <tr><td>Wheel position error p − p_ref (1), battery voltage (1)</td><td>Encoders, ADC</td></tr>
+    </tbody>
+  </table></div>
+  <p>Do not include anything the real robot can't measure (true linear velocity, true CoM). If you want it for training, give it only to the critic (asymmetric actor-critic).</p>
+  <p><b>Action (4–6 values):</b> wheel voltage L/R (scaled to ±V_max), and leg foot-height offset plus optional per-leg roll offset, which firmware turns into AX-12 commands through your IK. Policy at 100 Hz for the legs and 200–400 Hz for wheels; simplest is one policy at 200 Hz with leg outputs held between servo updates.</p>
+  <h3>Reward</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Term</th><th>Form</th><th>Start weight</th></tr></thead>
+    <tbody>
+      <tr><td>Upright</td><td class="mono">exp(−θ²/0.05)</td><td class="mono">+1.0</td></tr>
+      <tr><td>Forward velocity tracking</td><td class="mono">exp(−(v − v_cmd)²/0.1)</td><td class="mono">+1.0</td></tr>
+      <tr><td>Yaw rate tracking</td><td class="mono">exp(−(ψ̇ − ψ̇_cmd)²/0.2)</td><td class="mono">+0.5</td></tr>
+      <tr><td>Leg height tracking</td><td class="mono">exp(−(h − h_cmd)²/0.0004)</td><td class="mono">+0.5</td></tr>
+      <tr><td>Position drift (when v_cmd = 0)</td><td class="mono">−|p − p_ref|</td><td class="mono">−0.5</td></tr>
+      <tr><td>Action rate</td><td class="mono">−‖a_t − a_{t−1}‖²</td><td class="mono">−0.05</td></tr>
+      <tr><td>Energy</td><td class="mono">−Σ V·i (from motor model)</td><td class="mono">−0.001</td></tr>
+      <tr><td>Fall</td><td class="mono">|θ| &gt; 35° → terminate</td><td class="mono">−10</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Domain randomisation</h3>
+  <p>Ranges should cover your measurement uncertainty plus a margin. If the policy works across them, the real robot is just one more sample.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Parameter</th><th>Range</th></tr></thead>
+    <tbody>
+      <tr><td>Body mass / CoM offset</td><td class="mono">±15% / ±10 mm in x and z</td></tr>
+      <tr><td>Motor gain (N·Kt/R), back-EMF</td><td class="mono">±20%</td></tr>
+      <tr><td>Driver deadband, battery voltage</td><td class="mono">0–15% duty / 10.5–12.6 V</td></tr>
+      <tr><td>Floor friction</td><td class="mono">0.4–1.2</td></tr>
+      <tr><td>Control latency</td><td class="mono">2–15 ms</td></tr>
+      <tr><td>Gyro / accel noise, gyro bias</td><td class="mono">1–2× measured / ±0.02 rad/s</td></tr>
+      <tr><td>IMU mounting tilt</td><td class="mono">±2°</td></tr>
+      <tr><td>AX-12 kp, delay</td><td class="mono">±30% / 10–30 ms</td></tr>
+      <tr><td>Random pushes</td><td class="mono">0.5–2 N·s every 2–5 s</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Curriculum</h3>
+  <ol>
+    <li>Balance in place, fixed leg height, small randomisation.</li>
+    <li>Full randomisation, random leg heights, pushes.</li>
+    <li>Velocity and yaw-rate commands.</li>
+    <li>Height changes while moving; small floor bumps and slopes.</li>
+    <li>Optional later: jumps using leg extension, as Ascento and Diablo do.</li>
+  </ol>
+  <h3>Residual RL first</h3>
+  <p>In the residual variant the policy observes the same inputs plus the LQR output, and its action is added to it: <code>u = u_LQR + clip(α·a, ±2 V)</code>. Training is fast because LQR already balances, and on hardware a bad policy can only nudge a working controller. After that works, train the full policy with the same interface and compare.</p>
+<pre><code><span class="c"># PPO settings that are a reasonable starting point for this size of task</span>
+policy: MLP [128, 128], ELU;  critic: MLP [256, 256] with privileged obs
+num_envs: 4096 (MJX) | 32 (SB3);  episode: 20 s;  control dt: 5 ms
+lr 3e-4, gamma 0.99, lambda 0.95, clip 0.2, entropy 0.005, minibatches 4, epochs 5
+observation normalisation: running mean/std → frozen and exported with the weights</code></pre>
+</section>
+
+<!-- 08 -->
+<section id="deploy">
+  <div class="sec-head"><div class="eyebrow">08</div><h2>Deploy &amp; safety</h2><div class="tracks"><span class="chip t-mcu">MCU</span><span class="chip t-rl">RL</span><span class="chip t-lqr">LQR</span></div></div>
+  <h3>Getting the policy onto the ESP32-S3</h3>
+  <ul>
+    <li>Export weights, biases and observation mean/std to <code>policy_weights.h</code> as <code>float</code> arrays. A [24→128→128→4] MLP is about 20k multiply-adds: roughly 0.1–0.3 ms on one S3 core in plain C with <code>-O2</code>.</li>
+    <li>Write the forward pass yourself (three loops and an ELU). If you need more speed, use ESP-DSP's dot-product or ESP-DL with int8 quantisation; you likely won't need it.</li>
+    <li>Verify bit-exactness: feed 1000 recorded observations to the C code on the host and on the S3, compare against PyTorch/JAX output. Max error should be &lt; 1e-4.</li>
+  </ul>
+  <h3>Safety layer (always on, independent of controller)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Check</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>|θ| &gt; 35° (your current MAX_SAFE_TILT)</td><td>Motors off, latch until re-armed</td></tr>
+      <tr><td>RL output NaN, or |θ| &gt; 15° in RL mode</td><td>Switch to LQR for the rest of the run</td></tr>
+      <tr><td>Action magnitude and rate</td><td>Clip to ±V_max; limit change per tick</td></tr>
+      <tr><td>Loop overrun &gt; 2 ticks</td><td>Motors off, flag in telemetry</td></tr>
+      <tr><td>RC or Wi-Fi command timeout (300 ms)</td><td>Zero velocity command, keep balancing</td></tr>
+      <tr><td>Battery &lt; 3.4 V/cell</td><td>Crouch, stop, motors off</td></tr>
+      <tr><td>Task watchdog</td><td>esp_task_wdt on ctrl_task</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Hardware test protocol</h3>
+  <ol>
+    <li>Wheels off the ground on a stand: verify signs. A forward lean must spin wheels forward.</li>
+    <li>Harness (string from above, slack): LQR at the middle leg height.</li>
+    <li>Free balance, then all five leg heights, then push tests with a consistent tap.</li>
+    <li>Record every run; overlay with sim using the same push in the plotting script.</li>
+    <li>Repeat 2–4 with residual RL, then full RL.</li>
+  </ol>
+</section>
+
+<!-- 09 -->
+<section id="repo">
+  <div class="sec-head"><div class="eyebrow">09</div><h2>Proposed repo layout</h2></div>
+  <p>New top-level folders next to the existing <code>robot_control_suite/</code>. Nothing existing has to move.</p>
+<pre><code>sim/
+  params/paw_params.yaml        <span class="c"># every measured number, method, date. Single source of truth</span>
+  params/gen_headers.py         <span class="c"># → paw.xml values and esp32s3_firmware/include/paw_params.h</span>
+  model/paw.xml                 <span class="c"># MJCF, closed-loop legs, actuators, sensors, 5 keyframes</span>
+  model/meshes/                 <span class="c"># from BipedalMeshes.zip (decimated STLs)</span>
+  sysid/                        <span class="c"># bench-test scripts, fitting, plots of real vs sim</span>
+  lqr/design_lqr.py             <span class="c"># linearise, DARE per height, Monte-Carlo, writes lqr_gains.h</span>
+  rl/env_paw.py                 <span class="c"># Playground / Gymnasium env, randomisation, reward</span>
+  rl/train.py  rl/export.py     <span class="c"># PPO; export to policy_weights.h</span>
+  tools/overlay.py              <span class="c"># real telemetry vs sim traces</span>
+esp32s3_firmware/
+  platformio.ini
+  include/paw_params.h  lqr_gains.h  policy_weights.h
+  src/main.cpp  ctrl.cpp  estimator.cpp  ax12.cpp  ik.cpp  telem.cpp  safety.cpp
+esp32s3_dev/01_servo … 05_full_400hz_profile
+</code></pre>
+</section>
+
+<!-- 10 -->
+<section id="refs">
+  <div class="sec-head"><div class="eyebrow">10</div><h2>What to study</h2></div>
+  <div class="grid2">
+    <div class="card"><h4>Robots like yours</h4><ul>
+      <li><a href="https://github.com/upkie/upkie" target="_blank" rel="noopener">Upkie</a>: open-source wheeled biped with MuJoCo/Bullet sims, LQR-like and PPO balancers. Closest reference project.</li>
+      <li>Ascento (ETH Zürich) papers: LQR on a wheel-legged robot with a variable-height leg; gain scheduling over height.</li>
+      <li>Direct Drive Diablo and Unitree wheel-legged work: RL locomotion on the same morphology.</li></ul></div>
+    <div class="card"><h4>Simulator and RL</h4><ul>
+      <li><a href="https://mujoco.readthedocs.io/en/stable/modeling.html" target="_blank" rel="noopener">MuJoCo modelling guide</a>: equality constraints, actuators, <code>mjd_transitionFD</code>.</li>
+      <li><a href="https://github.com/google-deepmind/mujoco_playground" target="_blank" rel="noopener">MuJoCo Playground</a>: GPU RL environments and sim-to-real examples.</li>
+      <li><a href="https://stable-baselines3.readthedocs.io/" target="_blank" rel="noopener">Stable-Baselines3</a> PPO docs.</li></ul></div>
+    <div class="card"><h4>Control theory</h4><ul>
+      <li>Wheeled inverted pendulum derivation: Grasser et al., "JOE: a mobile, inverted pendulum" (2002).</li>
+      <li>Bryson's rule for Q/R; LQI for integral action.</li>
+      <li><code>python-control</code> and <code>scipy.linalg.solve_discrete_are</code>.</li></ul></div>
+    <div class="card"><h4>ESP32-S3</h4><ul>
+      <li><a href="https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/pcnt.html" target="_blank" rel="noopener">PCNT (quadrature encoders)</a></li>
+      <li><a href="https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/mcpwm.html" target="_blank" rel="noopener">MCPWM (motor PWM)</a></li>
+      <li><a href="https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/gpio.html" target="_blank" rel="noopener">GPIO and strapping pins</a></li></ul></div>
+  </div>
+  <div class="note"><b class="h">Your existing notes this plan builds on</b>
+    <p><code>docs/Robot_Specification.md</code> (geometry, masses), <code>docs/PAW_Research_Notes.md</code> (log findings: saturating Ki, I²C at 100 kHz, coarse encoder velocity, L298N), <code>robot_control_suite/black_pill_dev/</code> (staged bring-up pattern), and <code>BipedalMeshes.zip</code> (CAD for the sim).</p></div>
+</section>
+
+<footer>PAW sim-to-real plan · values marked "measure" are placeholders until bench-tested · pin map is a proposal, verify against your board.</footer>
+</main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});</script>
+</html>
