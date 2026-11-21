@@ -31,8 +31,8 @@ geometry_m:
   tibia_length:          {repo_value: 0.100, source: twin_kinematics.py, measured: null, status: UNCONFIRMED, procedure: M1.2}
   servo_mount_spacing:   {repo_value: 0.060, source: "twin_kinematics.py (+/-30 mm)", measured: null, status: UNCONFIRMED, procedure: M1.3}
   leg_separation:        {repo_value: 0.180, source: twin_kinematics.py, measured: null, status: UNCONFIRMED, procedure: M1.3}
-  wheel_diameter_nominal:{repo_value: 0.065, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.4}
-  wheel_effective_radius:{repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.4, note: "rolled, under load"}
+  wheel_diameter_nominal: {repo_value: 0.065, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.4}
+  wheel_effective_radius: {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.4, note: "rolled, under load"}
   wheel_track_width:     {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.3, note: "tyre-centre to tyre-centre"}
   standing_height_total: {repo_value: 0.330, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.2}
 
@@ -41,7 +41,7 @@ drive:
   gear_ratio:             {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.8}
   encoder_counts_per_wheel_rev_4x: {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.5}
   motor_resistance_ohm:   {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.6}
-  stall_current_A_at_11v1:{repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.7, note: "DECIDES MOTOR DRIVER"}
+  stall_current_A_at_11v1: {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.7, note: "DECIDES MOTOR DRIVER"}
 
 # ---------------------------------------------------- Phase M2 (after new electronics)
 whole_body:
@@ -50,7 +50,7 @@ whole_body:
   com_fore_aft_offset_m:   {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M2.3}
   pitch_inertia_about_com_kgm2: {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M2.4, note: "bifilar: I = m g D^2 T^2 / (16 pi^2 L)"}
   wheel_inertia_kgm2:      {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M2.5}
-  imu_position_from_axle_m:{repo_value: null, source: none, measured: {x: null, z: null}, status: UNCONFIRMED, procedure: M2.6}
+  imu_position_from_axle_m: {repo_value: null, source: none, measured: {x: null, z: null}, status: UNCONFIRMED, procedure: M2.6}
 
 motor_dynamics:            # per motor, wheels in the air
   left:  {gain_rad_s_per_V: null, time_constant_s: null, deadband_fwd_pct: null, deadband_rev_pct: null, status: UNCONFIRMED, procedure: M2.7}
