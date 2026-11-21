@@ -1,0 +1,64 @@
+# PAW physical parameter sheet: single source of truth for the sim model, LQR and RL.
+#
+# RULES
+#   * Every value starts as status: UNCONFIRMED. Only the robot's owner changes a
+#     status to CONFIRMED, after measuring it with the procedure in
+#     docs/ESP32_S3_Migration_Report.md section 2.2 (procedure ids M1.x / M2.x).
+#   * repo_value is what the repo/docs currently claim. It is a hint, not a truth.
+#   * Units are SI (kg, m, s, rad, A, V, ohm) so LQR/MuJoCo can read them directly.
+#   * measured: fill in your number; note: anything odd you saw while measuring.
+
+meta:
+  measured_by: null
+  date: null
+  leg_pose_for_phase_M2: "standing (foot y = -151 mm)"   # COM/inertia depend on leg height
+
+# ---------------------------------------------------------------- Phase M1 (now)
+masses_kg:
+  body_shell_printed:   {repo_value: 0.300, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  battery_3s_3300:      {repo_value: 0.260, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  ax12_servo_each:      {repo_value: 0.0535, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.1, note: "with horn"}
+  drive_motor_each:     {repo_value: 0.150, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.1, note: "with bracket?"}
+  wheel_each:           {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  top_femur_each:       {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  bottom_femur_each:    {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  tibia_each:           {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  electronics_total:    {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1, note: "ESP32 + driver(s) + buck + IMU + radio + RX + wiring; re-weigh after migration"}
+  fasteners_misc:       {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
+
+geometry_m:
+  femur_length:          {repo_value: 0.055, source: twin_kinematics.py, measured: null, status: UNCONFIRMED, procedure: M1.2}
+  tibia_length:          {repo_value: 0.100, source: twin_kinematics.py, measured: null, status: UNCONFIRMED, procedure: M1.2}
+  servo_mount_spacing:   {repo_value: 0.060, source: "twin_kinematics.py (+/-30 mm)", measured: null, status: UNCONFIRMED, procedure: M1.3}
+  leg_separation:        {repo_value: 0.180, source: twin_kinematics.py, measured: null, status: UNCONFIRMED, procedure: M1.3}
+  wheel_diameter_nominal:{repo_value: 0.065, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.4}
+  wheel_effective_radius:{repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.4, note: "rolled, under load"}
+  wheel_track_width:     {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.3, note: "tyre-centre to tyre-centre"}
+  standing_height_total: {repo_value: 0.330, source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M1.2}
+
+drive:
+  motor_model:            {repo_value: "JGA12V 300 rpm", source: README.md, measured: null, status: UNCONFIRMED, procedure: M1.8}
+  gear_ratio:             {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.8}
+  encoder_counts_per_wheel_rev_4x: {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.5}
+  motor_resistance_ohm:   {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.6}
+  stall_current_A_at_11v1:{repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.7, note: "DECIDES MOTOR DRIVER"}
+
+# ---------------------------------------------------- Phase M2 (after new electronics)
+whole_body:
+  total_mass_kg:           {repo_value: "~1.074 subtotal, incomplete", source: docs/Robot_Specification.md, measured: null, status: UNCONFIRMED, procedure: M2.1}
+  com_height_above_axle_m: {repo_value: null, source: none, measured: {standing: null, mid_crouch: null, full_crouch: null}, status: UNCONFIRMED, procedure: M2.2}
+  com_fore_aft_offset_m:   {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M2.3}
+  pitch_inertia_about_com_kgm2: {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M2.4, note: "bifilar: I = m g D^2 T^2 / (16 pi^2 L)"}
+  wheel_inertia_kgm2:      {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M2.5}
+  imu_position_from_axle_m:{repo_value: null, source: none, measured: {x: null, z: null}, status: UNCONFIRMED, procedure: M2.6}
+
+motor_dynamics:            # per motor, wheels in the air
+  left:  {gain_rad_s_per_V: null, time_constant_s: null, deadband_fwd_pct: null, deadband_rev_pct: null, status: UNCONFIRMED, procedure: M2.7}
+  right: {gain_rad_s_per_V: null, time_constant_s: null, deadband_fwd_pct: null, deadband_rev_pct: null, status: UNCONFIRMED, procedure: M2.7}
+
+electrical_levels_V:       # report section 1.4, decides level shifting
+  ax12_data_idle:     {measured: null, status: UNCONFIRMED}
+  encoder_out_high_at_5V_supply:  {measured: null, status: UNCONFIRMED}
+  encoder_out_high_at_3V3_supply: {measured: null, status: UNCONFIRMED}
+  ibus_signal_high:   {measured: null, status: UNCONFIRMED}
+  radio_3dr_tx_high:  {measured: null, status: UNCONFIRMED}
