@@ -28,6 +28,17 @@ loop() runs only when 10 000 µs have passed  → 100 Hz
 
 **Why it's built like this:** the Blue Pill has one core, so *everything* shares the same 10 ms. Each slow peripheral (radio, servo bus, RC) gets a microsecond budget so it can never delay the PID. That discipline is good. On the ESP32 we keep the idea but enforce it with hardware (two cores and task priorities) instead of by hand.
 
+### 0.1b The two receive paths (RX), because both get ported
+
+- **RC (`readRC()`)** runs every 10 ms with a 400 µs budget. It feeds bytes into the IBusBM decoder in polling mode. Polling is deliberate: the library's timer mode runs from an interrupt that can stall the PID. A frame counts as fresh only when the decoder's *checksum-valid frame counter* changes, because raw byte arrival can be just line noise.
+  - **Failsafe:** if no valid frame arrives for 500 ms, every stick command is zeroed and the motors disarm. The arm switch must then be seen LOW again before it can re-arm, so a link that recovers with the switch still up can't re-energise the motors.
+  - **Centring:** stick centres are captured from the first ~20 frames while disarmed.
+  - **Verified channel map:** Ch3 drive, Ch4 steer, Ch5 IMU-cal, Ch6 target=0, **Ch7 arm**, Ch8 trim, Ch9 leg select, Ch10 crouch. The header at the top of `main.cpp` (lines 13–20) still describes an older map. Ignore it.
+- **3DR commands (`handleTelemetryRX()`)** read bytes into a 48-byte line buffer, converting to upper case, for at most 300 µs per tick. On `\n` they hand the line to `parseCommand()`, which checks the longest prefixes first (e.g. `RVS` before `RV` before `R`). Nothing allocates memory, nothing blocks, and an over-long line is simply truncated.
+- **On the ESP32**, both move into their own tasks on core 0. The failsafe logic carries over unchanged; only *where* it runs changes.
+
+I'll do the full line-by-line walkthrough of each module as we port it, so you see the old and new versions side by side.
+
 ### 0.2 Things the code reveals that the docs don't say
 
 | Finding | Where | Why it matters for the port |
@@ -117,6 +128,10 @@ A **3 A buck** gives about 3× headroom. This is why I recommend a *separate swi
 | Radio | none | Wi-Fi + BLE | telemetry, tuning, **OTA flashing** |
 | ⚠️ Pins | some 5 V tolerant | **NONE are 5 V tolerant** (3.6 V absolute max) | must measure every external signal level (§1.4) |
 
+**Framework: PlatformIO + Arduino-ESP32 core**, the same "normal PlatformIO code" style you already know. It still gives full access to ESP-IDF underneath (FreeRTOS tasks, PCNT, LEDC, the UART RS-485 mode, `esp_timer`) whenever we need it.
+- **Rejected for now:** pure ESP-IDF. It's more verbose, and you'd be learning a new framework and new hardware at the same time.
+- **What would flip this:** a library you need that only exists for ESP-IDF, or micro-ROS later (it works with both).
+
 **Software architecture (planned):** FreeRTOS tasks instead of one `loop()`.
 - **Core 1 → `controlTask`** (highest priority). A hardware timer wakes it every 1/f seconds. It reads the IMU and encoders, runs safety and control, and writes the PWM. Nothing else runs on this core, so Wi-Fi can never steal time from it.
 - **Core 0 → `commsTask`** (Wi-Fi/UDP telemetry and commands), **`rcTask`** (iBUS), and **`legTask`** (AX-12 bus, IK).
@@ -158,7 +173,7 @@ Assumes an ESP32-S3-DevKitC-1 with a WROOM-1 **N16R8/N8R8** module (octal PSRAM)
 | Function | GPIO | Peripheral | Why this pin |
 |---|---|---|---|
 | Battery sense | 1 | ADC1_CH0 | ADC1 works with Wi-Fi on |
-| Left motor IN1 / IN2 | 4 / 5 | LEDC 20 kHz | not strapping, so motors can't twitch at boot |
+| Left motor IN1 / IN2 | 4 / 5 | LEDC 20 kHz | not strapping pins. I haven't yet checked Espressif's *power-up glitch* table; I'll do that before finalising |
 | Right motor IN1 / IN2 | 6 / 7 | LEDC 20 kHz | same |
 | Left encoder A / B | 15 / 16 | PCNT unit 0 | free (no 32 kHz crystal used) |
 | Right encoder A / B | 17 / 18 | PCNT unit 1 | |
@@ -200,7 +215,7 @@ Every value goes into [`model/robot_params.yaml`](../model/robot_params.yaml) wi
 | # | Quantity | Tool | Procedure |
 |---|---|---|---|
 | M1.1 | Each part's mass | kitchen scale, ±1 g | Weigh every part listed in the YAML separately: body, each femur/tibia, each servo with horn, each motor with bracket, each wheel, battery. Weigh three times and record the average. |
-| M1.2 | Link lengths (hole centre to hole centre) | calipers | For each femur and tibia, measure edge-to-edge distance between the two holes, then add one hole diameter. Compare with 55 / 100 mm. |
+| M1.2 | Link lengths (hole centre to hole centre) | calipers | For each femur and tibia, measure from the **inner** edge of one hole to the **inner** edge of the other (the shortest gap), then add one hole diameter. Same-size holes assumed; if they differ, add half of each diameter. Compare with 55 / 100 mm. |
 | M1.3 | Servo mount spacing | calipers | Horn axis to horn axis on each leg (the IK assumes 60 mm). Also the spacing between the two legs (assumed 180 mm). |
 | M1.4 | Wheel **effective** rolling radius | tape | With the robot's weight on it, roll 10 full turns in a straight line. r = distance / (20π). Tyres squash, so this is not the diameter divided by 2. |
 | M1.5 | Encoder counts per wheel turn | firmware | Mark the wheel, turn it exactly 10 turns by hand, and read the counts (4× decode on the new board). Gives CPR × gear ratio directly. |
@@ -213,7 +228,7 @@ Every value goes into [`model/robot_params.yaml`](../model/robot_params.yaml) wi
 | # | Quantity | Method |
 |---|---|---|
 | M2.1 | Total mass | scale, everything installed, at the standing leg pose |
-| M2.2 | **COM height above the wheel axle** | (a) **Balance-edge method:** lay the robot on its side on a thin rod parallel to the wheel axle and slide it until it balances; the COM is directly above the rod, so measure rod-to-axle distance. (b) **Plumb-line:** hang it from two different points, draw the vertical through each, and the intersection is the COM. **Do it at 2–3 leg heights**, since crouch moves the COM. |
+| M2.2 | **COM height above the wheel axle** | (a) **Balance-edge method:** lay the robot **on its back** (front facing up, wheel axle horizontal), resting on a thin round rod that is **parallel to the wheel axle**. Slide it until it balances. The COM is now directly above the rod, so measure the distance along the body from the rod to the wheel-axle centre. That is the COM height *l*. (b) **Plumb-line:** hang it from two different points, draw the vertical through each, and the intersection is the COM. **Do it at 2–3 leg heights**, since crouch moves the COM. |
 | M2.3 | COM fore/aft offset | the same methods along the other axis. This is what your `trim_bias` integrator has been learning. |
 | M2.4 | **Pitch inertia** about the COM | **Bifilar pendulum:** hang the robot on two parallel strings (length L, spacing D) so the pitch axis is vertical. Twist it slightly, time 20 oscillations, T = total/20. Then I = m·g·D²·T² / (16·π²·L). |
 | M2.5 | Wheel and rotor inertia | Bifilar on one wheel; the motor rotor reflected through the gearbox comes from the motor sysID (M2.7) |
@@ -304,8 +319,11 @@ Each step only works if the step before it is honest. That's why the measurement
 - **Q-C2.** Wi-Fi mode: the robot joins your home router, or the robot runs its own access point?
 - **Q-T1.** What exactly do you mean by "esptune"? A tool, or just tuning on the ESP32?
 - **Q-S1.** Laptop: OS, CPU, RAM, and does it have an NVIDIA GPU? This decides MuJoCo CPU vs MJX/Isaac for RL.
+- **Q-P1.** In the CAD zip, what are `Configuration_1` (two bodies), and how do `tibia_1` and `tibia_2` differ? I need these to assign masses.
 - **Q-F1.** Name for the new firmware folder (suggestion: `robot_control_suite/esp32s3_bal/`).
 
 ---
+
+*Not yet verified against a datasheet (from memory, treat as approximate):* the TB6612FNG, BTS7960 and DRV8833-current figures, the AX-12 9–12 V rating, the 5 V current budget, and the ESP32-S3 power-up glitch behaviour.
 
 *Sources checked for this report:* [TI DRV8871 datasheet](https://ti.com/lit/gpn/DRV8871) · [TI DRV8833 datasheet](https://ti.com/document-viewer/DRV8833/datasheet) · [Cytron MDD3A datasheet](https://cdn.shopify.com/s/files/1/0176/3274/files/MDD3A_Datasheet.pdf) · [Espressif ESP32-S3 datasheet](https://documentation.espressif.com/esp32-s3_datasheet_en.html) · [Espressif boot-mode/strapping](https://docs.espressif.com/projects/esptool/en/latest/esp32s3/advanced-topics/boot-mode-selection.html) · [BNO08x report rates (Luxonis)](https://docs.luxonis.com/hardware/platform/sensors/imu/bno08x) · [BNO08x I²C clock-stretching notes](https://github.com/bradcar/bno08x_i2c_spi_MicroPython)

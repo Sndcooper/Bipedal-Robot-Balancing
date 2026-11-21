@@ -22,7 +22,9 @@ masses_kg:
   wheel_each:           {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
   top_femur_each:       {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
   bottom_femur_each:    {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
-  tibia_each:           {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
+  tibia_1_each:         {repo_value: null, source: "CAD part tibia_1", measured: null, status: UNCONFIRMED, procedure: M1.1}
+  tibia_2_each:         {repo_value: null, source: "CAD part tibia_2", measured: null, status: UNCONFIRMED, procedure: M1.1}
+  configuration_1_part: {repo_value: null, source: "CAD part Configuration_1 (identity unknown, ask owner)", measured: null, status: UNCONFIRMED, procedure: M1.1}
   electronics_total:    {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1, note: "ESP32 + driver(s) + buck + IMU + radio + RX + wiring; re-weigh after migration"}
   fasteners_misc:       {repo_value: null, source: none, measured: null, status: UNCONFIRMED, procedure: M1.1}
 

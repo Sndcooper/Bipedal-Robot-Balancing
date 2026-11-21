@@ -41,7 +41,7 @@ Verified from the code. Several docs and skills describe older variants, so trus
 
 ## Known doc conflicts (flag these, don't trust them)
 
-- The RC channel maps differ between `robot_control_suite/README.md`, `docs/Hardware_Connections.md` and `rcbfw/README.md`. For rcbfw, the `rcbfw` README and its `main.cpp` header are correct.
+- The RC channel maps differ between `robot_control_suite/README.md`, `docs/Hardware_Connections.md` and `rcbfw/README.md`. Verified in `readRC()`, rcbfw uses: Ch3 drive (`rc_raw[2]`), Ch4 steer, Ch5 IMU-cal, Ch6 target=0, **Ch7 arm** (`rc_raw[6]`), Ch8 target trim, Ch9 leg select, Ch10 crouch. That matches `rcbfw/README.md` and the `main.cpp` header at L81–94. The header block at **L13–20 (Ch2 drive / Ch1 steer / Ch5 arm) is stale**, and so are the `rc_arm` variable comments ("Ch5").
 - `HARDWARE_CONNECTIONS_STM32F401_BLACK_PILL.md` calls itself authoritative for "every variant", but `rcbfw` targets the F103 Blue Pill.
 - `docs/Robot_Specification.md` lists a partial mass budget (~1074 g subtotal) with no COM or inertia. All of it is unconfirmed for modelling.
 
